@@ -1,0 +1,69 @@
+name: Build ARM64 DEB (Raspberry Pi 5)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths-ignore:
+      - '*.md'
+      - 'mac/**'
+      - 'windows/**'
+
+jobs:
+  build-arm64-deb:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize submodules
+        run: |
+          git submodule update --init --recursive || true
+          if [ ! -f deps/singleapplication/CMakeLists.txt ]; then
+            echo "Submodule missing, cloning manually..."
+            rm -rf deps/singleapplication
+            git clone https://github.com/itay-grudev/SingleApplication deps/singleapplication
+          fi
+          if [ ! -f deps/libmpv/include/mpv/client.h ]; then
+            echo "libmpv headers missing, cloning manually..."
+            rm -rf deps/libmpv
+            git clone https://github.com/Ivshti/libmpv deps/libmpv
+          fi
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake pkgconf librsvg2-bin wget \
+            libssl-dev \
+            qtbase5-dev qtdeclarative5-dev qtwebengine5-dev \
+            libqt5webchannel5-dev libqt5dbus5 libqt5opengl5-dev \
+            qml-module-qtwebchannel qml-module-qtwebengine \
+            qml-module-qt-labs-platform qml-module-qtquick-dialogs \
+            qml-module-qtquick-controls qml-module-qt-labs-settings \
+            qml-module-qt-labs-folderlistmodel \
+            libmpv-dev nodejs
+
+      - name: Build and package
+        run: |
+          chmod +x scripts/build-deb.sh scripts/stremio-launcher.sh
+          bash scripts/build-deb.sh --compile
+
+      - name: Upload DEB artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stremio-arm64-deb
+          path: "*.deb"
+          retention-days: 90
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stremio-arm64-binary
+          path: |
+            build/stremio
+            server.js
+            icons/
+          retention-days: 90

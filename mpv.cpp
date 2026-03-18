@@ -155,10 +155,15 @@ void MpvObject::initialize_mpv() {
     // No need to set, will be auto-detected
     //mpv::qt::set_property(mpv, "opengl-backend", "angle");
 
-    // Set cache to a reasonable value
-    mpv::qt::set_property(mpv, "cache-default", 15000);
-    mpv::qt::set_property(mpv, "cache-backbuffer", 15000);
+    // Set cache to a reasonable value (modern mpv properties)
+    mpv::qt::set_property(mpv, "demuxer-max-bytes", "150MiB");
+    mpv::qt::set_property(mpv, "demuxer-max-back-bytes", "75MiB");
     mpv::qt::set_property(mpv, "cache-secs", 10);
+
+#if defined(Q_OS_LINUX) && (defined(__aarch64__) || defined(__arm__))
+    // Enable hardware decoding on ARM Linux (Raspberry Pi V4L2 M2M)
+    mpv::qt::set_property(mpv, "hwdec", "auto");
+#endif
 
     // Visible app / stream names
     mpv::qt::set_property(mpv, "audio-client-name", QCoreApplication::applicationName());
@@ -200,6 +205,33 @@ void MpvObject::command(const QVariant& params)
 
 void MpvObject::setProperty(const QString& name, const QVariant& value)
 {
+    // Fix deprecated/broken properties sent by the remote web UI
+    if (name == "vo" && value.toString() == "opengl-cb") {
+        // opengl-cb was replaced by libmpv in modern mpv
+        mpv::qt::set_property(mpv, "vo", "libmpv");
+        return;
+    }
+    if (name == "input-defalt-bindings") {
+        // Fix typo from web UI: defalt -> default
+        mpv::qt::set_property(mpv, "input-default-bindings", value);
+        return;
+    }
+    if (name == "no-sub-ass") {
+        // Deprecated property, use sub-ass-override instead
+        mpv::qt::set_property(mpv, "sub-ass-override", value.toBool() ? "force" : "no");
+        return;
+    }
+    if (name == "cache-default" || name == "cache-backbuffer") {
+        // These properties were removed in modern mpv; ignore silently
+        return;
+    }
+#if defined(Q_OS_LINUX) && (defined(__aarch64__) || defined(__arm__))
+    if (name == "hwdec" && value.toString() == "no") {
+        // On ARM Linux, override hwdec=no from web UI to keep hardware decoding
+        mpv::qt::set_property(mpv, "hwdec", "auto");
+        return;
+    }
+#endif
     mpv::qt::set_property(mpv, name, value);
 }
 

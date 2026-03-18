@@ -95,6 +95,9 @@ int main(int argc, char **argv)
     std::setlocale(LC_NUMERIC, "C");
     
 
+    // Initialize QtWebEngine before creating the QML engine
+    QtWebEngine::initialize();
+
     static QQmlApplicationEngine* engine = new QQmlApplicationEngine();
 
     qmlRegisterType<Process>("com.stremio.process", 1, 0, "Process");
