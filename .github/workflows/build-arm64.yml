@@ -1,0 +1,52 @@
+name: Build ARM64 (Raspberry Pi 5)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  build-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake pkgconf librsvg2-bin wget \
+            libssl-dev \
+            qtbase5-dev qtdeclarative5-dev qtwebengine5-dev \
+            libqt5webchannel5-dev libqt5dbus5 libqt5opengl5-dev \
+            qml-module-qtwebchannel qml-module-qtwebengine \
+            qml-module-qt-labs-platform qml-module-qtquick-dialogs \
+            qml-module-qtquick-controls qml-module-qt-labs-settings \
+            qml-module-qt-labs-folderlistmodel \
+            libmpv-dev nodejs
+
+      - name: Build Stremio
+        run: make -f release.makefile
+
+      - name: Prepare artifact
+        run: |
+          mkdir -p artifact
+          cp build/stremio artifact/
+          [ -f server.js ] && cp server.js artifact/
+          [ -d icons ] && cp -r icons artifact/
+          echo "Build completed on $(date)" > artifact/BUILD_INFO.txt
+          echo "Architecture: $(uname -m)" >> artifact/BUILD_INFO.txt
+          echo "OS: $(lsb_release -ds 2>/dev/null || cat /etc/os-release | head -1)" >> artifact/BUILD_INFO.txt
+          file artifact/stremio >> artifact/BUILD_INFO.txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stremio-arm64-rpi5
+          path: artifact/
+          retention-days: 90
