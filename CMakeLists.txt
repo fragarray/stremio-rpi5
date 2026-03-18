@@ -33,18 +33,19 @@ set(SOURCES
   qml.qrc
 )
 
-set(MPV_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/deps/libmpv/include)
 if(NOT DEFINED QT_DEFAULT_MAJOR_VERSION)
   set(QT_DEFAULT_MAJOR_VERSION 5)
 endif()
 
 if(WIN32)
+  set(MPV_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/deps/libmpv/include)
   list(APPEND SOURCES stremio.rc)
   set(ENV{Qt6_DIR} $ENV{QTDIR})
   set(MPV_LIBRARY_mpv ${CMAKE_CURRENT_SOURCE_DIR}/deps/libmpv/win32/mpv.lib)
 endif()
 
 if(APPLE)
+  set(MPV_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/deps/libmpv/include)
   list(APPEND SOURCES images/stremio.icns)
   set_source_files_properties(images/stremio.icns PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
   set(MPV_LIBRARY_mpv ${CMAKE_CURRENT_SOURCE_DIR}/iina/deps/lib/libmpv.dylib)
