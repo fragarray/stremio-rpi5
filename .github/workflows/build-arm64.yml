@@ -13,8 +13,20 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
+
+      - name: Initialize submodules
+        run: |
+          git submodule update --init --recursive || true
+          if [ ! -f deps/singleapplication/CMakeLists.txt ]; then
+            echo "Submodule missing, cloning manually..."
+            rm -rf deps/singleapplication
+            git clone https://github.com/itay-grudev/SingleApplication deps/singleapplication
+          fi
+          if [ ! -f deps/libmpv/include/mpv/client.h ]; then
+            echo "libmpv headers missing, cloning manually..."
+            rm -rf deps/libmpv
+            git clone https://github.com/Ivshti/libmpv deps/libmpv
+          fi
 
       - name: Install dependencies
         run: |
