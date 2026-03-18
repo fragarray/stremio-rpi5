@@ -111,6 +111,12 @@ target_include_directories(${PROJECT_NAME} PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${MPV_INCLUDE_DIR}
 )
+# On Linux, also add bundled mpv dir for qthelper.hpp (not shipped by system libmpv-dev)
+if(UNIX AND NOT APPLE)
+  target_include_directories(${PROJECT_NAME} PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/deps/libmpv/include
+  )
+endif()
 
 target_link_libraries(${PROJECT_NAME} LINK_PUBLIC
   Qt5::Qml
