@@ -281,4 +281,4 @@ echo "Package details:"
 dpkg-deb --info "${DEB_FILE}"
 echo ""
 echo "Package contents:"
-dpkg-deb --contents "${DEB_FILE}" | head -30
+dpkg-deb --contents "${DEB_FILE}" | head -30 || true
