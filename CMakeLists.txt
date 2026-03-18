@@ -111,10 +111,15 @@ target_include_directories(${PROJECT_NAME} PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${MPV_INCLUDE_DIR}
 )
-# On Linux, also add bundled mpv dir for qthelper.hpp (not shipped by system libmpv-dev)
+# On Linux, qthelper.hpp is not shipped by system libmpv-dev.
+# Copy only qthelper.hpp to a separate dir to avoid the bundled client.h
+# (which lacks MPV_EXPORT) from shadowing the system headers.
 if(UNIX AND NOT APPLE)
+  file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/mpv-compat/mpv)
+  file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/deps/libmpv/include/mpv/qthelper.hpp
+       DESTINATION ${CMAKE_BINARY_DIR}/mpv-compat/mpv)
   target_include_directories(${PROJECT_NAME} PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/deps/libmpv/include
+    ${CMAKE_BINARY_DIR}/mpv-compat
   )
 endif()
 
