@@ -79,12 +79,8 @@ async function downloadSubtitle(url) {
 function findBestMatch(results, language) {
   const match = results.find(s => s.lang === language);
   if (!match) return null;
-  return {
-    id: match.id,
-    url: match.url,
-    lang: match.lang,
-    format: guessFormatFromUrl(match.url),
-  };
+  // Return the FULL original object — the web UI may depend on extra fields
+  return Object.assign({}, match);
 }
 
 /**

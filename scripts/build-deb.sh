@@ -115,6 +115,26 @@ cp -r "${ICONS_DIR}" "${INSTALL_DIR}/"
 # Install SVG icon for hi-res
 install -Dm 644 "${SOURCE_DIR}/images/stremio.svg" "${INSTALL_DIR}/stremio.svg"
 
+# Install DualSubtitles addon
+ADDON_SRC="${SOURCE_DIR}/DualSubtitles AddOn"
+ADDON_DEST="${INSTALL_DIR}/DualSubtitles"
+if [ -d "${ADDON_SRC}" ]; then
+    echo "  Including DualSubtitles addon..."
+    mkdir -p "${ADDON_DEST}/src"
+    install -Dm 644 "${ADDON_SRC}/index.js" "${ADDON_DEST}/index.js"
+    install -Dm 644 "${ADDON_SRC}/package.json" "${ADDON_DEST}/package.json"
+    install -Dm 644 "${ADDON_SRC}/package-lock.json" "${ADDON_DEST}/package-lock.json" 2>/dev/null || true
+    for f in "${ADDON_SRC}/src/"*.js; do
+        [ -f "$f" ] && install -Dm 644 "$f" "${ADDON_DEST}/src/$(basename "$f")"
+    done
+    # Bundle node_modules for offline install
+    if [ -d "${ADDON_SRC}/node_modules" ]; then
+        cp -a "${ADDON_SRC}/node_modules" "${ADDON_DEST}/"
+    fi
+else
+    echo "  Warning: DualSubtitles addon source not found, skipping."
+fi
+
 # Create node symlink (will be resolved at postinst if needed)
 # We don't bundle node - we depend on the nodejs package
 
@@ -176,8 +196,11 @@ Description: Stremio - Freedom to Stream
  movies, TV shows, series, and live TV channels.
  .
  This package is built for Raspberry Pi 5 (arm64/aarch64) running Ubuntu.
- It includes the Stremio shell (Qt5/WebEngine UI) and the Node.js streaming
- server backend.
+ It includes the Stremio shell (Qt5/WebEngine UI), the Node.js streaming
+ server backend, and the DualSubtitles addon for dual subtitle display.
+ .
+ The DualSubtitles addon starts automatically with Stremio. To activate it,
+ go to Settings → Addons and install http://127.0.0.1:7000/manifest.json
 CONTROL
 
 # postinst script
@@ -211,10 +234,27 @@ if command -v update-mime-database >/dev/null 2>&1; then
     update-mime-database /usr/share/mime 2>/dev/null || true
 fi
 
+# Install DualSubtitles addon dependencies if node_modules not bundled
+if [ -d /opt/stremio/DualSubtitles ] && [ -f /opt/stremio/DualSubtitles/package.json ]; then
+    if [ ! -d /opt/stremio/DualSubtitles/node_modules ]; then
+        echo "Installing DualSubtitles addon dependencies..."
+        NODE_BIN=$(command -v node 2>/dev/null || command -v nodejs 2>/dev/null || true)
+        NPM_BIN=$(command -v npm 2>/dev/null || true)
+        if [ -n "${NPM_BIN}" ]; then
+            cd /opt/stremio/DualSubtitles && "${NPM_BIN}" install --production 2>/dev/null || true
+            cd /
+        fi
+    fi
+fi
+
 echo ""
 echo "============================================"
 echo "  Stremio installed successfully!"
 echo "  Run 'stremio' or launch from the menu."
+echo ""
+echo "  DualSubtitles addon included."
+echo "  Activate in Stremio: Settings → Addons →"
+echo "  http://127.0.0.1:7000/manifest.json"
 echo "============================================"
 echo ""
 POSTINST

@@ -44,7 +44,10 @@ jobs:
             qml-module-qt-labs-platform qml-module-qtquick-dialogs \
             qml-module-qtquick-controls qml-module-qt-labs-settings \
             qml-module-qt-labs-folderlistmodel \
-            libmpv-dev nodejs
+            libmpv-dev nodejs npm
+
+      - name: Install addon dependencies
+        run: cd "DualSubtitles AddOn" && npm install --production
 
       - name: Extract version
         id: version
@@ -81,6 +84,7 @@ jobs:
             ### What's included
             - Stremio shell (Qt5/WebEngine UI) compiled natively for ARM64
             - Node.js streaming server (server.js)
+            - DualSubtitles addon (dual subtitle support with independent styling)
             - Launcher script with automatic server management
             - Desktop integration (icons, MIME types, .desktop file)
 
@@ -130,7 +134,10 @@ jobs:
             qml-module-qt-labs-platform qml-module-qtquick-dialogs \
             qml-module-qtquick-controls qml-module-qt-labs-settings \
             qml-module-qt-labs-folderlistmodel \
-            libmpv-dev nodejs
+            libmpv-dev nodejs npm
+
+      - name: Install addon dependencies
+        run: cd "DualSubtitles AddOn" && npm install --production
 
       - name: Build and package .deb
         run: |

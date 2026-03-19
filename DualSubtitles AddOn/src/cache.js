@@ -3,7 +3,7 @@
 /**
  * Simple in-memory cache with TTL support.
  */
-class Cache {
+class gCache {
   constructor(ttlMs) {
     this._ttl = ttlMs || 5 * 60 * 1000; // default 5 minutes
     this._store = new Map();
@@ -40,4 +40,4 @@ class Cache {
   }
 }
 
-module.exports = Cache;
+module.exports = gCache;

@@ -9,6 +9,7 @@ import com.stremio.screensaver 1.0
 import com.stremio.libmpv 1.0
 import com.stremio.clipboard 1.0
 import QtQml 2.2
+import Qt.labs.settings 1.0
 
 import "autoupdater.js" as Autoupdater
 
@@ -72,11 +73,37 @@ ApplicationWindow {
         property int dualSecondaryTrackId: -1
         property bool dualSubtitlesActive: false
         property var dualSecondaryStyle: null
+        property string dualContentType: ""   // e.g. "series" or "movie"
+        property string dualVideoId: ""        // e.g. "tt32420734:1:2"
+        property bool dualPlayerMode: false     // true when player UI is active
+        property int dualPrimaryTrackId: -1
+        property string dualPrimarySubUrl: ""
+        property bool dualPrimaryManaged: false  // true when primary is rendered via mpv (after lang change)
 
         signal event(var ev, var args)
         function onEvent(ev, args) {
+            // Debug: log ALL events from web UI
+            if (ev !== "mpv-prop-change" && ev !== "mpv-observe-prop") {
+                try {
+                    console.log("[DualSub-transport] ev=" + ev + " args=" + JSON.stringify(args));
+                } catch(e) {
+                    console.log("[DualSub-transport] ev=" + ev + " args=(not serializable)");
+                }
+            }
+
             if (ev === "quit") quitApp()
             if (ev === "app-ready") transport.flushQueue()
+
+            // Cleanup dual when user switches to an embedded subtitle via sid
+            // (sid="no" is normal for addon subs rendered by HTML overlay, so ignore it)
+            // Also skip cleanup if primary is managed by mpv (we set sid ourselves)
+            if (ev === "mpv-set-prop" && args && args[0] === "sid" && transport.dualSubtitlesActive && !transport.dualPrimaryManaged) {
+                if (args[1] !== "no" && args[1] !== false) {
+                    console.log("[DualSub] sid changed to '" + args[1] + "' while dual active, cleaning up");
+                    mpv.cleanupDualSub();
+                }
+            }
+
             if (ev === "mpv-command" && args && args[0] !== "run") mpv.command(args)
             if (ev === "mpv-set-prop") {
                 mpv.setProperty(args[0], args[1]);
@@ -86,21 +113,12 @@ ApplicationWindow {
             }
             if (ev === "mpv-observe-prop") mpv.observeProperty(args)
 
-            // Dual subtitles: enable
+            // Dual subtitles: enable (manual event from web UI, if ever used)
             if (ev === "dual-sub-enable" && args) {
-                // args = { secondaryUrl: "http://...", style: { fontSize, color, outlineColor, outlineSize, bold } }
                 transport.dualSecondarySubUrl = args.secondaryUrl || "";
                 transport.dualSecondaryStyle = args.style || null;
                 transport.dualSubtitlesActive = true;
-                mpv.command(["sub-add", args.secondaryUrl, "auto", "Secondary"]);
-                // Style will be applied when track-list updates and secondary-sid is set
-                if (args.style) {
-                    mpv.setProperty("sub-font-size", args.style.fontSize || 40);
-                    mpv.setProperty("sub-color", args.style.color || "#FFFF00");
-                    mpv.setProperty("sub-outline-color", args.style.outlineColor || "#000000");
-                    mpv.setProperty("sub-outline-size", args.style.outlineSize || 2);
-                    mpv.setProperty("sub-bold", args.style.bold ? "yes" : "no");
-                }
+                mpv.command(["sub-add", args.secondaryUrl, "auto", "DualSecondary"]);
                 console.log("[DualSub] Enabled dual subtitles, loading secondary: " + args.secondaryUrl);
             }
 
@@ -132,9 +150,12 @@ ApplicationWindow {
                 mpv.setProperty("secondary-sub-pos", args);
             }
 
-            if (ev === "control-event") wakeupEvent()
-            if (ev === "wakeup") wakeupEvent()
-            if (ev === "set-window-mode") onWindowMode(args)
+            if (ev === "control-event") wakeupEvent();
+            if (ev === "wakeup") wakeupEvent();
+            if (ev === "set-window-mode") {
+                transport.dualPlayerMode = (args === "player");
+                onWindowMode(args);
+            }
             if (ev === "open-external") Qt.openUrlExternally(args)
             if (ev === "win-focus" && !root.visible) {
                 showWindow();
@@ -347,35 +368,323 @@ ApplicationWindow {
     }
 
     //
+    // DualSubtitles Addon Server
+    //
+    Process {
+        id: addonServer
+        property int errors: 0
+
+        onStarted: function() { stayAliveAddonServer.stop() }
+        onFinished: function(code, status) {
+            if (errors < 5 && (code !== 0 || status !== 0) && !root.quitting) {
+                console.log("[DualSub] Addon server exited with code " + code + ", restarting...");
+                errors++;
+            }
+            stayAliveAddonServer.start();
+        }
+        onAddressReady: function (address) {
+            console.log("[DualSub] Addon server ready at: " + address);
+        }
+        onErrorThrown: function (error) {
+            if (root.quitting) return;
+            console.log("[DualSub] Addon server error: " + error);
+        }
+    }
+    function launchAddonServer() {
+        var node_executable = applicationDirPath + "/node"
+        if (Qt.platform.os === "windows") node_executable = applicationDirPath + "/stremio-runtime.exe"
+        var addonDir = applicationDirPath + "/DualSubtitles"
+        addonServer.start(node_executable,
+            [addonDir + "/index.js"],
+            "HTTP addon accessible at:"
+        )
+    }
+    Timer {
+        id: stayAliveAddonServer
+        interval: 10000
+        running: false
+        onTriggered: function () { root.launchAddonServer() }
+    }
+
+    //
     // Player
     //
     MpvObject {
         id: mpv
         anchors.fill: parent
         onMpvEvent: function(ev, args) {
-            // Dual subtitles: detect new track added and set secondary-sid
-            if (ev === "mpv-prop-change" && args && args.name === "track-list" && transport.dualSubtitlesActive) {
+            // === DUAL SUBTITLES: TRACK-LIST MONITORING ===
+            if (ev === "mpv-prop-change" && args && args.name === "track-list") {
                 var tracks = args.data;
                 if (Array.isArray(tracks)) {
-                    for (var i = 0; i < tracks.length; i++) {
-                        var t = tracks[i];
-                        if (t.type === "sub" && t.external === true && t.title === "Secondary") {
-                            if (transport.dualSecondaryTrackId !== t.id) {
-                                transport.dualSecondaryTrackId = t.id;
-                                mpv.setProperty("secondary-sid", t.id);
-                                console.log("[DualSub] Set secondary-sid to track " + t.id);
+                    // Log all subtitle tracks for debugging (including external-filename)
+                    var subTracks = [];
+                    for (var d = 0; d < tracks.length; d++) {
+                        if (tracks[d].type === "sub") {
+                            subTracks.push({
+                                id: tracks[d].id,
+                                title: tracks[d].title || "(no title)",
+                                lang: tracks[d].lang || "(no lang)",
+                                selected: !!tracks[d].selected,
+                                external: !!tracks[d].external,
+                                extFile: tracks[d]["external-filename"] || "",
+                                codec: tracks[d].codec || "?"
+                            });
+                        }
+                    }
+                    if (subTracks.length > 0) {
+                        console.log("[DualSub] Track-list update — " + subTracks.length + " sub tracks:");
+                        for (var dl = 0; dl < subTracks.length; dl++) {
+                            var st = subTracks[dl];
+                            var extInfo = st.external ? " extFile=" + st.extFile.substring(0, 80) : "";
+                            console.log("[DualSub]   #" + st.id + " title='" + st.title + "' lang=" + st.lang + " sel=" + st.selected + " ext=" + st.external + extInfo + " codec=" + st.codec);
+                        }
+                        console.log("[DualSub]   dualActive=" + transport.dualSubtitlesActive + " secondaryTrackId=" + transport.dualSecondaryTrackId);
+                    }
+
+                    // Phase 1: If dual subtitles active, find DualSecondary track and assign secondary-sid + styles
+                    if (transport.dualSubtitlesActive) {
+                        for (var i = 0; i < tracks.length; i++) {
+                            var t = tracks[i];
+                            if (t.type === "sub" && t.external === true && t.title === "DualSecondary") {
+                                if (transport.dualSecondaryTrackId !== t.id) {
+                                    transport.dualSecondaryTrackId = t.id;
+                                    // secondary-sid MUST be a string (not number) — mpv rejects double type
+                                    mpv.setProperty("secondary-sid", "" + t.id);
+                                    // Use "no" so mpv preserves our ASS styling from the proxy
+                                    mpv.setProperty("secondary-sub-ass-override", "no");
+                                    mpv.setProperty("secondary-sub-visibility", "yes");
+                                    console.log("[DualSub] Phase1: Set secondary-sid=" + t.id + " with ASS styling");
+                                }
                             }
-                            break;
+                            // Handle primary track managed by mpv (after language change from panel)
+                            if (t.type === "sub" && t.external === true && t.title === "DualPrimary") {
+                                if (transport.dualPrimaryTrackId !== t.id) {
+                                    transport.dualPrimaryTrackId = t.id;
+                                    mpv.setProperty("sid", "" + t.id);
+                                    mpv.setProperty("sub-ass-override", "no");
+                                    mpv.setProperty("sub-visibility", "yes");
+                                    console.log("[DualSub] Phase1: Set sid=" + t.id + " for DualPrimary");
+                                }
+                            }
+                        }
+                    }
+
+                    // Phase 3: Cleanup if dual is active but DualSecondary track
+                    // disappeared (video changed). Subtitle deselection is handled
+                    // by the dualPollTimer's localStorage polling.
+                    if (transport.dualSubtitlesActive) {
+                        var secondaryExists = false;
+                        var primaryExists = false;
+                        for (var k = 0; k < tracks.length; k++) {
+                            if (tracks[k].type === "sub" && tracks[k].title === "DualSecondary") secondaryExists = true;
+                            if (tracks[k].type === "sub" && tracks[k].title === "DualPrimary") primaryExists = true;
+                        }
+                        if (!secondaryExists) {
+                            console.log("[DualSub] Phase3: Cleanup (secondaryExists=false, video likely changed)");
+                            mpv.cleanupDualSub();
+                        }
+                        // If primary track was managed but disappeared, reset the flag
+                        if (transport.dualPrimaryManaged && !primaryExists) {
+                            transport.dualPrimaryManaged = false;
+                            transport.dualPrimaryTrackId = -1;
+                            transport.dualPrimarySubUrl = "";
                         }
                     }
                 }
             }
+
             transport.event(ev, args);
         }
 
+        // Fetch secondary subtitle info from the addon and load it via secondary-sid
+        // Uses /dual-fetch/ which triggers on-demand subtitle search if cache is empty
+        function fetchDualSecondary(contentType, videoId) {
+            var xhr = new XMLHttpRequest();
+            var url = "http://127.0.0.1:7000/dual-fetch/" + encodeURIComponent(contentType) + "/" + encodeURIComponent(videoId);
+            console.log("[DualSub] fetchDualSecondary: GET " + url);
+            xhr.open("GET", url);
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState === XMLHttpRequest.DONE) {
+                    console.log("[DualSub] XHR response: status=" + xhr.status + " body=" + xhr.responseText.substring(0, 300));
+                    if (xhr.status === 200) {
+                        try {
+                            var info = JSON.parse(xhr.responseText);
+                            // Always activate panel so user can change languages
+                            transport.dualSubtitlesActive = true;
+                            transport.dualContentType = contentType;
+                            transport.dualVideoId = videoId;
+                            dualPollTimer.failCount = 0;
+                            dualPollTimer.stallCount = 0;
+                            if (info.secondaryUrl) {
+                                transport.dualSecondarySubUrl = info.secondaryUrl;
+                                transport.dualSecondaryStyle = info.style || null;
+                                // Build styled ASS proxy URL using panel settings
+                                var styledUrl = "http://127.0.0.1:7000/dual-styled-sub?url=" + encodeURIComponent(info.secondaryUrl)
+                                    + "&fontSize=" + dualPanel.secFontSize
+                                    + "&color=" + dualPanel.secColor
+                                    + "&borderColor=" + dualPanel.secBorderColor
+                                    + "&borderSize=" + dualPanel.secBorderSize
+                                    + "&bold=" + (dualPanel.secBold ? "true" : "false")
+                                    + "&alignment=" + (dualPanel.secPositionTop ? "8" : "2");
+                                mpv.command(["sub-add", styledUrl, "auto", "DualSecondary"]);
+                                console.log("[DualSub] Loading secondary (" + info.secondaryLang + "): " + styledUrl);
+                            } else {
+                                console.log("[DualSub] No secondary found for: " + videoId + " — panel active for language selection (available: " + JSON.stringify(info.available || []) + ")");
+                            }
+                        } catch (e) {
+                            console.log("[DualSub] Error parsing dual-fetch response: " + e);
+                            dualPollTimer.failCount++;
+                        }
+                    } else {
+                        console.log("[DualSub] dual-fetch request failed: " + xhr.status);
+                        dualPollTimer.failCount++;
+                    }
+                }
+            };
+            xhr.send();
+        }
+
+        // Cleanup dual subtitle state
+        function cleanupDualSub() {
+            mpv.setProperty("secondary-sid", "no");
+            if (transport.dualSecondaryTrackId > 0) {
+                mpv.command(["sub-remove", transport.dualSecondaryTrackId.toString()]);
+            }
+            // Cleanup primary if managed by mpv
+            if (transport.dualPrimaryManaged && transport.dualPrimaryTrackId > 0) {
+                mpv.command(["sub-remove", transport.dualPrimaryTrackId.toString()]);
+            }
+            transport.dualSubtitlesActive = false;
+            transport.dualSecondarySubUrl = "";
+            transport.dualSecondaryTrackId = -1;
+            transport.dualSecondaryStyle = null;
+            transport.dualContentType = "";
+            transport.dualVideoId = "";
+            transport.dualPrimaryTrackId = -1;
+            transport.dualPrimarySubUrl = "";
+            transport.dualPrimaryManaged = false;
+            console.log("[DualSub] Cleaned up dual subtitles");
+        }
+
         Component.onCompleted: {
-            // Observe track-list for dual subtitle detection
             mpv.observeProperty("track-list");
+        }
+    }
+
+    // === DUAL SUBTITLES: localStorage polling for detection ===
+    // Stremio v4.4 web UI renders addon subtitles via HTML overlay (not mpv sub-add).
+    // We detect when the user selects "DUAL ..." by polling localStorage, then load
+    // only the SECONDARY subtitle via mpv secondary-sid for independent control.
+    // Primary is rendered by the web UI's HTML overlay normally.
+    Timer {
+        id: dualPollTimer
+        interval: 3000
+        running: true
+        repeat: true
+        property bool pendingCheck: false
+        property string lastActivatedVideoKey: ""
+        property int failCount: 0
+        property int stallCount: 0  // counts polls where isDual but not active and not retrying
+
+        onTriggered: {
+            if (dualPollTimer.pendingCheck) return;
+
+            // Only poll when content is playing
+            var mpvPath = mpv.getProperty("path");
+            if (typeof mpvPath !== "string" || mpvPath === "") {
+                if (transport.dualSubtitlesActive) {
+                    console.log("[DualSub] Content stopped, cleaning up dual");
+                    mpv.cleanupDualSub();
+                }
+                dualPollTimer.lastActivatedVideoKey = "";
+                dualPollTimer.failCount = 0;
+                dualPollTimer.stallCount = 0;
+                return;
+            }
+
+            dualPollTimer.pendingCheck = true;
+
+            // Read subtitle selection + type + videoId from the web UI hash
+            // Hash format: #/player/{type}/{imdbId}/{videoId}/...
+            var jsCode = "(function() { " +
+                "if(!window._dualActivitySetup){window._dualActivitySetup=true;function u(){window._dualLastActivity=Date.now();}document.addEventListener('mousemove',u,true);document.addEventListener('keydown',u,true);document.addEventListener('click',u,true);document.addEventListener('touchstart',u,true);}" +
+                "var subs = localStorage.getItem('subtitles') || ''; " +
+                "var rawHash = window.location.hash || ''; " +
+                "var parts = rawHash.split('/'); " +
+                "var type = parts.length > 2 ? parts[2] : ''; " +
+                "var videoId = ''; " +
+                "if (parts.length > 4) { try { videoId = decodeURIComponent(parts[4]); } catch(e) { videoId = parts[4]; } } " +
+                "return JSON.stringify({ subtitles: subs, type: type, videoId: videoId, hash: rawHash.substring(0, 200) }); " +
+                "})()";
+
+            webView.runJavaScript(jsCode, function(result) {
+                try {
+                    var data = JSON.parse(result);
+                    var isDual = (typeof data.subtitles === "string" && data.subtitles.indexOf("DUAL ") === 0);
+                    var videoId = data.videoId || "";
+                    var contentType = data.type || "";
+
+                    // Log hash once per session for debugging
+                    if (isDual && dualPollTimer.failCount === 0 && !transport.dualSubtitlesActive) {
+                        console.log("[DualSub] Hash: " + (data.hash || "(empty)"));
+                        console.log("[DualSub] Parsed: type=" + contentType + " videoId=" + videoId);
+                    }
+
+                    if (isDual && !transport.dualSubtitlesActive) {
+                        // DUAL selected but not active — try to activate
+                        // Retry if: new video, or previous failures (up to 5), or stalled (XHR silently failed)
+                        var isNewVideo = (videoId !== dualPollTimer.lastActivatedVideoKey);
+                        var hasRetriesLeft = (dualPollTimer.failCount > 0 && dualPollTimer.failCount < 5);
+                        dualPollTimer.stallCount++;
+                        var isStalled = (dualPollTimer.stallCount >= 3); // force retry after ~9s of no progress
+                        var shouldTry = isNewVideo || hasRetriesLeft || isStalled;
+                        if (videoId !== "" && contentType !== "" && shouldTry) {
+                            console.log("[DualSub] DUAL detected ('" + data.subtitles + "'), type=" + contentType + " videoId=" + videoId + " fail=" + dualPollTimer.failCount + " stall=" + dualPollTimer.stallCount);
+                            dualPollTimer.stallCount = 0;
+                            mpv.fetchDualSecondary(contentType, videoId);
+                            dualPollTimer.lastActivatedVideoKey = videoId;
+                        } else if (videoId === "") {
+                            // No videoId in hash — fall back to /dual-latest
+                            console.log("[DualSub] DUAL detected but no videoId in hash, trying /dual-latest");
+                            var xhr = new XMLHttpRequest();
+                            xhr.open("GET", "http://127.0.0.1:7000/dual-latest");
+                            xhr.onreadystatechange = function() {
+                                if (xhr.readyState === XMLHttpRequest.DONE) {
+                                    if (xhr.status === 200) {
+                                        try {
+                                            var info = JSON.parse(xhr.responseText);
+                                            if (info.active && info.secondaryUrl && info.videoKey !== dualPollTimer.lastActivatedVideoKey) {
+                                                console.log("[DualSub] Activating from /dual-latest, videoKey=" + info.videoKey);
+                                                transport.dualSubtitlesActive = true;
+                                                transport.dualSecondarySubUrl = info.secondaryUrl;
+                                                transport.dualSecondaryStyle = info.style || null;
+                                                mpv.command(["sub-add", info.secondaryUrl, "auto", "DualSecondary"]);
+                                                dualPollTimer.lastActivatedVideoKey = info.videoKey;
+                                            }
+                                        } catch (e) {
+                                            console.log("[DualSub] Error parsing dual-latest: " + e);
+                                        }
+                                    }
+                                    dualPollTimer.pendingCheck = false;
+                                }
+                            };
+                            xhr.send();
+                            return; // pendingCheck cleared in XHR callback
+                        }
+                    } else if (!isDual && transport.dualSubtitlesActive) {
+                        // DUAL deselected — cleanup
+                        console.log("[DualSub] DUAL subtitle deselected (now: '" + data.subtitles + "'), cleaning up");
+                        mpv.cleanupDualSub();
+                        dualPollTimer.lastActivatedVideoKey = "";
+                        dualPollTimer.failCount = 0;
+                        dualPollTimer.stallCount = 0;
+                    }
+                } catch (e) {
+                    // runJavaScript might fail if page not loaded yet — ignore
+                }
+                dualPollTimer.pendingCheck = false;
+            });
         }
     }
 
@@ -626,6 +935,502 @@ ApplicationWindow {
         }
     }
 
+    // === DUAL SUBTITLES: Settings Toggle Button ===
+    // Uses activity polling via injected JS to detect mouse/key events in WebEngineView
+    Timer {
+        id: dualActivityTimer
+        interval: 500
+        running: transport.dualSubtitlesActive
+        repeat: true
+        property real lastActivity: 0
+        onTriggered: {
+            webView.runJavaScript("window._dualLastActivity||0", function(ts) {
+                if (typeof ts === "number" && ts > dualActivityTimer.lastActivity) {
+                    dualActivityTimer.lastActivity = ts;
+                    dualShowBtn();
+                }
+            });
+        }
+    }
+    Timer {
+        id: dualBtnHideTimer
+        interval: 3000
+        repeat: false
+        onTriggered: dualBtnVisible = false
+    }
+    property bool dualBtnVisible: false
+    function dualShowBtn() {
+        if (transport.dualSubtitlesActive) {
+            dualBtnVisible = true;
+            dualBtnHideTimer.restart();
+        }
+    }
+    Rectangle {
+        id: dualSettingsBtn
+        visible: transport.dualSubtitlesActive && !dualPanel.visible && dualBtnVisible
+        width: 44; height: 44; radius: 22
+        color: dualBtnMa.containsMouse ? "#CC4444AA" : "#AA333366"
+        anchors.left: parent.left
+        anchors.bottom: parent.bottom
+        anchors.leftMargin: 16
+        anchors.bottomMargin: 80
+        z: 999
+        Text {
+            text: "S\u2082"
+            color: "#FFFF00"
+            font.pixelSize: 18
+            font.bold: true
+            anchors.centerIn: parent
+        }
+        MouseArea {
+            id: dualBtnMa
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: dualPanel.visible = true
+        }
+    }
+
+    // === DUAL SUBTITLES: Persistent Settings ===
+    Settings {
+        id: dualSettings
+        category: "DualSubtitles"
+        property int fontSize: 20
+        property string color: "FFFF00"
+        property string borderColor: "000000"
+        property int borderSize: 2
+        property bool bold: false
+        property bool positionTop: true
+        property string primaryLang: "ita"
+        property string secondaryLang: "spa"
+    }
+
+    // === DUAL SUBTITLES: Settings Panel ===
+    Rectangle {
+        id: dualPanel
+        visible: false
+        width: 310
+        height: dualPanelCol.height + 32
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.rightMargin: 20
+        anchors.topMargin: 60
+        color: "#EE1a1a2e"
+        border.color: "#555577"
+        border.width: 1
+        radius: 10
+        z: 1000
+
+        // Settings state
+        property int secFontSize: dualSettings.fontSize
+        property string secColor: dualSettings.color
+        property string secBorderColor: dualSettings.borderColor
+        property int secBorderSize: dualSettings.borderSize
+        property bool secBold: dualSettings.bold
+        property bool secPositionTop: dualSettings.positionTop
+        property real secDelay: 0.0
+        property string secPrimaryLang: dualSettings.primaryLang
+        property string secSecondaryLang: dualSettings.secondaryLang
+        property bool langSearching: false
+
+        // Persist settings when changed
+        onSecFontSizeChanged: dualSettings.fontSize = secFontSize
+        onSecColorChanged: dualSettings.color = secColor
+        onSecBorderColorChanged: dualSettings.borderColor = secBorderColor
+        onSecBorderSizeChanged: dualSettings.borderSize = secBorderSize
+        onSecBoldChanged: dualSettings.bold = secBold
+        onSecPositionTopChanged: dualSettings.positionTop = secPositionTop
+        onSecPrimaryLangChanged: dualSettings.primaryLang = secPrimaryLang
+        onSecSecondaryLangChanged: dualSettings.secondaryLang = secSecondaryLang
+
+        // Hide when dual deactivated
+        Connections {
+            target: transport
+            onDualSubtitlesActiveChanged: {
+                if (!transport.dualSubtitlesActive) {
+                    dualPanel.visible = false;
+                    dualBtnVisible = false;
+                    // Remove CSS overlay hide if primary was managed
+                    if (transport.dualPrimaryManaged) {
+                        webView.runJavaScript("(function(){ var s=document.getElementById('dual-hide-overlay'); if(s) s.remove(); })()");
+                    }
+                } else {
+                    dualShowBtn();
+                    // Inject activity tracker for auto-hide polling
+                    webView.runJavaScript("(function(){if(window._dualActivitySetup)return;window._dualActivitySetup=true;function u(){window._dualLastActivity=Date.now();}document.addEventListener('mousemove',u,true);document.addEventListener('keydown',u,true);document.addEventListener('click',u,true);document.addEventListener('touchstart',u,true);u();})()");
+                }
+            }
+        }
+
+        // Debounce style reload (ASS re-generation)
+        Timer {
+            id: dualReloadTimer
+            interval: 400
+            repeat: false
+            onTriggered: dualPanel.doReload()
+        }
+
+        function scheduleReload() { dualReloadTimer.restart(); }
+
+        function doReload() {
+            if (!transport.dualSubtitlesActive || !transport.dualSecondarySubUrl) return;
+            // If primary is mpv-managed, reload both tracks
+            if (transport.dualPrimaryManaged) { dualPanel.doReloadBoth(); return; }
+            if (transport.dualSecondaryTrackId > 0) {
+                mpv.setProperty("secondary-sid", "no");
+                mpv.command(["sub-remove", "" + transport.dualSecondaryTrackId]);
+                transport.dualSecondaryTrackId = -1;
+            }
+            var u = "http://127.0.0.1:7000/dual-styled-sub?url=" + encodeURIComponent(transport.dualSecondarySubUrl)
+                + "&fontSize=" + dualPanel.secFontSize
+                + "&color=" + dualPanel.secColor
+                + "&borderColor=" + dualPanel.secBorderColor
+                + "&borderSize=" + dualPanel.secBorderSize
+                + "&bold=" + (dualPanel.secBold ? "true" : "false")
+                + "&alignment=" + (dualPanel.secPositionTop ? "8" : "2");
+            mpv.command(["sub-add", u, "auto", "DualSecondary"]);
+            console.log("[DualSub] Style reload: size=" + secFontSize + " color=#" + secColor + " pos=" + (secPositionTop ? "top" : "bottom"));
+        }
+
+        // Search for subtitles with new secondary language
+        function searchLanguages(newSecLang) {
+            if (!transport.dualSubtitlesActive || transport.dualContentType === "" || transport.dualVideoId === "") return;
+            dualPanel.langSearching = true;
+            var xhr = new XMLHttpRequest();
+            var url = "http://127.0.0.1:7000/dual-search/" + encodeURIComponent(transport.dualContentType)
+                + "/" + encodeURIComponent(transport.dualVideoId)
+                + "?primaryLang=" + dualPanel.secPrimaryLang
+                + "&secondaryLang=" + newSecLang;
+            console.log("[DualSub] Language search: " + url);
+            xhr.open("GET", url);
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState === XMLHttpRequest.DONE) {
+                    dualPanel.langSearching = false;
+                    if (xhr.status === 200) {
+                        try {
+                            var info = JSON.parse(xhr.responseText);
+                            if (info.found && info.secondaryUrl) {
+                                dualPanel.secSecondaryLang = newSecLang;
+                                transport.dualSecondarySubUrl = info.secondaryUrl;
+                                console.log("[DualSub] Language changed, new secondary: " + info.secondaryLang + " " + info.secondaryUrl);
+                                dualPanel.doReload();
+                            } else {
+                                console.log("[DualSub] Language not found: " + newSecLang + " (available: " + JSON.stringify(info.available) + ")");
+                            }
+                        } catch(e) {
+                            console.log("[DualSub] Language search parse error: " + e);
+                        }
+                    }
+                }
+            };
+            xhr.send();
+        }
+
+        // Search for subtitles with new primary language — switches primary to mpv-managed
+        function searchPrimaryLanguage(newPriLang) {
+            if (!transport.dualSubtitlesActive || transport.dualContentType === "" || transport.dualVideoId === "") return;
+            dualPanel.langSearching = true;
+            var xhr = new XMLHttpRequest();
+            var url = "http://127.0.0.1:7000/dual-search/" + encodeURIComponent(transport.dualContentType)
+                + "/" + encodeURIComponent(transport.dualVideoId)
+                + "?primaryLang=" + newPriLang
+                + "&secondaryLang=" + dualPanel.secSecondaryLang;
+            console.log("[DualSub] Primary language search: " + url);
+            xhr.open("GET", url);
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState === XMLHttpRequest.DONE) {
+                    dualPanel.langSearching = false;
+                    if (xhr.status === 200) {
+                        try {
+                            var info = JSON.parse(xhr.responseText);
+                            if (info.found && info.primaryUrl) {
+                                dualPanel.secPrimaryLang = newPriLang;
+                                transport.dualPrimarySubUrl = info.primaryUrl;
+                                // Also update secondary if returned
+                                if (info.secondaryUrl) transport.dualSecondarySubUrl = info.secondaryUrl;
+                                // Switch to mpv-managed primary
+                                transport.dualPrimaryManaged = true;
+                                // Hide Stremio HTML subtitle overlay
+                                webView.runJavaScript("(function(){ if(!document.getElementById('dual-hide-overlay')){ var s=document.createElement('style'); s.id='dual-hide-overlay'; s.textContent='video::cue{visibility:hidden!important;color:transparent!important} [class*=\"subtitle\"]{visibility:hidden!important} [class*=\"Subtitle\"]{visibility:hidden!important} [class*=\"cue-\"]{visibility:hidden!important}'; document.head.appendChild(s); }})()");
+                                console.log("[DualSub] Primary language changed to " + newPriLang + ", switching to mpv-managed primary");
+                                dualPanel.doReloadBoth();
+                            } else {
+                                console.log("[DualSub] Primary language not found: " + newPriLang);
+                            }
+                        } catch(e) {
+                            console.log("[DualSub] Primary language search parse error: " + e);
+                        }
+                    }
+                }
+            };
+            xhr.send();
+        }
+
+        // Reload both primary and secondary tracks (when primary is mpv-managed)
+        function doReloadBoth() {
+            if (!transport.dualSubtitlesActive) return;
+            // Remove old secondary
+            if (transport.dualSecondaryTrackId > 0) {
+                mpv.setProperty("secondary-sid", "no");
+                mpv.command(["sub-remove", "" + transport.dualSecondaryTrackId]);
+                transport.dualSecondaryTrackId = -1;
+            }
+            // Remove old primary
+            if (transport.dualPrimaryTrackId > 0) {
+                mpv.command(["sub-remove", "" + transport.dualPrimaryTrackId]);
+                transport.dualPrimaryTrackId = -1;
+            }
+            // Add new primary (bottom, alignment=2)
+            if (transport.dualPrimarySubUrl) {
+                var pu = "http://127.0.0.1:7000/dual-styled-sub?url=" + encodeURIComponent(transport.dualPrimarySubUrl)
+                    + "&fontSize=" + dualPanel.secFontSize
+                    + "&color=FFFFFF&borderColor=000000&borderSize=2&bold=false&alignment=2";
+                mpv.command(["sub-add", pu, "auto", "DualPrimary"]);
+            }
+            // Add new secondary (using panel settings)
+            if (transport.dualSecondarySubUrl) {
+                var su = "http://127.0.0.1:7000/dual-styled-sub?url=" + encodeURIComponent(transport.dualSecondarySubUrl)
+                    + "&fontSize=" + dualPanel.secFontSize
+                    + "&color=" + dualPanel.secColor
+                    + "&borderColor=" + dualPanel.secBorderColor
+                    + "&borderSize=" + dualPanel.secBorderSize
+                    + "&bold=" + (dualPanel.secBold ? "true" : "false")
+                    + "&alignment=" + (dualPanel.secPositionTop ? "8" : "2");
+                mpv.command(["sub-add", su, "auto", "DualSecondary"]);
+            }
+            console.log("[DualSub] Reloaded both tracks (primary mpv-managed)");
+        }
+
+        Column {
+            id: dualPanelCol
+            anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+            anchors.margins: 16
+            spacing: 10
+
+            // --- Title bar ---
+            Item {
+                width: parent.width; height: 24
+                Text {
+                    text: "\u2699 Sottotitoli Duali"
+                    color: "#FFFFFF"; font.pixelSize: 15; font.bold: true
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+                Text {
+                    text: "\u2715"
+                    color: closeMa.containsMouse ? "#FFFFFF" : "#888888"
+                    font.pixelSize: 18
+                    anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                    MouseArea {
+                        id: closeMa; anchors.fill: parent; anchors.margins: -6
+                        hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                        onClicked: dualPanel.visible = false
+                    }
+                }
+            }
+            Rectangle { width: parent.width; height: 1; color: "#444466" }
+
+            // --- Primary Language ---
+            Text { text: "Lingua primaria" + (dualPanel.langSearching ? " \u23F3" : ""); color: "#BBBBBB"; font.pixelSize: 13 }
+            Flickable {
+                width: parent.width; height: 34
+                contentWidth: priLangRow.width; clip: true
+                flickableDirection: Flickable.HorizontalFlick
+                Row {
+                    id: priLangRow; spacing: 4
+                    Repeater {
+                        model: ["ita","eng","spa","fre","ger","por","jpn","kor","chi","ara","rus","hin","pol","tur","dut","swe","nor","dan","fin","cze","ron","hun","ell","heb","tha","vie","ind","may","pob","hrv","slv"]
+                        Rectangle {
+                            width: priLangText.width + 14; height: 28; radius: 4
+                            color: dualPanel.secPrimaryLang === modelData ? "#44AA44" : "#333355"
+                            border.color: dualPanel.secPrimaryLang === modelData ? "#88FF88" : "#444466"
+                            Text { id: priLangText; text: modelData.toUpperCase(); color: dualPanel.secPrimaryLang === modelData ? "#FFF" : "#AAA"; font.pixelSize: 12; font.bold: dualPanel.secPrimaryLang === modelData; anchors.centerIn: parent }
+                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                onClicked: { if (modelData !== dualPanel.secPrimaryLang) dualPanel.searchPrimaryLanguage(modelData); } }
+                        }
+                    }
+                }
+            }
+
+            // --- Secondary Language ---
+            Text { text: "Lingua secondaria" + (dualPanel.langSearching ? " \u23F3" : ""); color: "#BBBBBB"; font.pixelSize: 13 }
+            Flickable {
+                width: parent.width; height: 34
+                contentWidth: secLangRow.width; clip: true
+                flickableDirection: Flickable.HorizontalFlick
+                Row {
+                    id: secLangRow; spacing: 4
+                    Repeater {
+                        model: ["ita","eng","spa","fre","ger","por","jpn","kor","chi","ara","rus","hin","pol","tur","dut","swe","nor","dan","fin","cze","ron","hun","ell","heb","tha","vie","ind","may","pob","hrv","slv"]
+                        Rectangle {
+                            width: langText2.width + 14; height: 28; radius: 4
+                            color: dualPanel.secSecondaryLang === modelData ? "#4444AA" : "#333355"
+                            border.color: dualPanel.secSecondaryLang === modelData ? "#8888FF" : "#444466"
+                            Text { id: langText2; text: modelData.toUpperCase(); color: dualPanel.secSecondaryLang === modelData ? "#FFF" : "#AAA"; font.pixelSize: 12; font.bold: dualPanel.secSecondaryLang === modelData; anchors.centerIn: parent }
+                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                onClicked: { if (modelData !== dualPanel.secSecondaryLang) dualPanel.searchLanguages(modelData); } }
+                        }
+                    }
+                }
+            }
+
+            Rectangle { width: parent.width; height: 1; color: "#444466" }
+
+            // --- Font Size ---
+            Row {
+                spacing: 8
+                Text { text: "Dimensione"; color: "#BBBBBB"; font.pixelSize: 13; width: 90; anchors.verticalCenter: parent.verticalCenter }
+                Rectangle {
+                    width: 32; height: 28; radius: 4; color: fsMinus.containsMouse ? "#555577" : "#333355"
+                    Text { text: "\u2212"; color: "#FFF"; font.pixelSize: 16; anchors.centerIn: parent }
+                    MouseArea { id: fsMinus; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                        onClicked: { if (dualPanel.secFontSize > 10) { dualPanel.secFontSize -= 2; dualPanel.scheduleReload(); } } }
+                }
+                Text { text: dualPanel.secFontSize; color: "#FFF"; font.pixelSize: 15; width: 30;
+                    horizontalAlignment: Text.AlignHCenter; anchors.verticalCenter: parent.verticalCenter }
+                Rectangle {
+                    width: 32; height: 28; radius: 4; color: fsPlus.containsMouse ? "#555577" : "#333355"
+                    Text { text: "+"; color: "#FFF"; font.pixelSize: 16; anchors.centerIn: parent }
+                    MouseArea { id: fsPlus; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                        onClicked: { if (dualPanel.secFontSize < 60) { dualPanel.secFontSize += 2; dualPanel.scheduleReload(); } } }
+                }
+            }
+
+            // --- Font Color ---
+            Text { text: "Colore testo"; color: "#BBBBBB"; font.pixelSize: 13 }
+            Row {
+                spacing: 6
+                Repeater {
+                    model: ["FFFF00", "FFFFFF", "00FF00", "00FFFF", "FF6600", "FF0000", "FF69B4"]
+                    Rectangle {
+                        width: 30; height: 30; radius: 15
+                        color: "#" + modelData
+                        border.color: dualPanel.secColor === modelData ? "#FFFFFF" : "#555555"
+                        border.width: dualPanel.secColor === modelData ? 3 : 1
+                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                            onClicked: { dualPanel.secColor = modelData; dualPanel.scheduleReload(); } }
+                    }
+                }
+            }
+
+            // --- Border Color ---
+            Text { text: "Colore bordo"; color: "#BBBBBB"; font.pixelSize: 13 }
+            Row {
+                spacing: 6
+                Repeater {
+                    model: ["000000", "FFFFFF", "555555", "000088", "880000"]
+                    Rectangle {
+                        width: 30; height: 30; radius: 15
+                        color: "#" + modelData
+                        border.color: dualPanel.secBorderColor === modelData ? "#FFFF00" : "#777777"
+                        border.width: dualPanel.secBorderColor === modelData ? 3 : 1
+                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                            onClicked: { dualPanel.secBorderColor = modelData; dualPanel.scheduleReload(); } }
+                    }
+                }
+            }
+
+            // --- Border Size ---
+            Row {
+                spacing: 8
+                Text { text: "Spessore bordo"; color: "#BBBBBB"; font.pixelSize: 13; width: 110; anchors.verticalCenter: parent.verticalCenter }
+                Rectangle {
+                    width: 32; height: 28; radius: 4; color: bsMinus.containsMouse ? "#555577" : "#333355"
+                    Text { text: "\u2212"; color: "#FFF"; font.pixelSize: 16; anchors.centerIn: parent }
+                    MouseArea { id: bsMinus; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                        onClicked: { if (dualPanel.secBorderSize > 0) { dualPanel.secBorderSize--; dualPanel.scheduleReload(); } } }
+                }
+                Text { text: dualPanel.secBorderSize; color: "#FFF"; font.pixelSize: 15; width: 20;
+                    horizontalAlignment: Text.AlignHCenter; anchors.verticalCenter: parent.verticalCenter }
+                Rectangle {
+                    width: 32; height: 28; radius: 4; color: bsPlus.containsMouse ? "#555577" : "#333355"
+                    Text { text: "+"; color: "#FFF"; font.pixelSize: 16; anchors.centerIn: parent }
+                    MouseArea { id: bsPlus; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                        onClicked: { if (dualPanel.secBorderSize < 6) { dualPanel.secBorderSize++; dualPanel.scheduleReload(); } } }
+                }
+            }
+
+            // --- Bold ---
+            Row {
+                spacing: 8
+                Text { text: "Grassetto"; color: "#BBBBBB"; font.pixelSize: 13; width: 90; anchors.verticalCenter: parent.verticalCenter }
+                Rectangle {
+                    width: 60; height: 28; radius: 4
+                    color: dualPanel.secBold ? "#4444AA" : "#333355"
+                    border.color: dualPanel.secBold ? "#6666CC" : "#444466"
+                    Text { text: dualPanel.secBold ? "ON" : "OFF"; color: "#FFF"; font.pixelSize: 13; font.bold: true; anchors.centerIn: parent }
+                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                        onClicked: { dualPanel.secBold = !dualPanel.secBold; dualPanel.scheduleReload(); } }
+                }
+            }
+
+            // --- Position ---
+            Row {
+                spacing: 8
+                Text { text: "Posizione"; color: "#BBBBBB"; font.pixelSize: 13; width: 90; anchors.verticalCenter: parent.verticalCenter }
+                Rectangle {
+                    width: 70; height: 28; radius: 4
+                    color: dualPanel.secPositionTop ? "#4444AA" : "#333355"
+                    border.color: dualPanel.secPositionTop ? "#6666CC" : "#444466"
+                    Text { text: "\u2191 Alto"; color: "#FFF"; font.pixelSize: 13; anchors.centerIn: parent }
+                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                        onClicked: { dualPanel.secPositionTop = true; dualPanel.scheduleReload(); } }
+                }
+                Rectangle {
+                    width: 70; height: 28; radius: 4
+                    color: !dualPanel.secPositionTop ? "#4444AA" : "#333355"
+                    border.color: !dualPanel.secPositionTop ? "#6666CC" : "#444466"
+                    Text { text: "\u2193 Basso"; color: "#FFF"; font.pixelSize: 13; anchors.centerIn: parent }
+                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                        onClicked: { dualPanel.secPositionTop = false; dualPanel.scheduleReload(); } }
+                }
+            }
+
+            Rectangle { width: parent.width; height: 1; color: "#444466" }
+
+            // --- Delay (live, no reload) ---
+            Row {
+                spacing: 8
+                Text { text: "Ritardo"; color: "#BBBBBB"; font.pixelSize: 13; width: 90; anchors.verticalCenter: parent.verticalCenter }
+                Rectangle {
+                    width: 32; height: 28; radius: 4; color: delMinus.containsMouse ? "#555577" : "#333355"
+                    Text { text: "\u2212"; color: "#FFF"; font.pixelSize: 16; anchors.centerIn: parent }
+                    MouseArea { id: delMinus; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            dualPanel.secDelay = Math.round((dualPanel.secDelay - 0.1) * 10) / 10;
+                            mpv.setProperty("secondary-sub-delay", "" + dualPanel.secDelay);
+                        }
+                    }
+                }
+                Text {
+                    text: (dualPanel.secDelay >= 0 ? "+" : "") + dualPanel.secDelay.toFixed(1) + "s"
+                    color: "#FFF"; font.pixelSize: 14; width: 50
+                    horizontalAlignment: Text.AlignHCenter; anchors.verticalCenter: parent.verticalCenter
+                }
+                Rectangle {
+                    width: 32; height: 28; radius: 4; color: delPlus.containsMouse ? "#555577" : "#333355"
+                    Text { text: "+"; color: "#FFF"; font.pixelSize: 16; anchors.centerIn: parent }
+                    MouseArea { id: delPlus; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            dualPanel.secDelay = Math.round((dualPanel.secDelay + 0.1) * 10) / 10;
+                            mpv.setProperty("secondary-sub-delay", "" + dualPanel.secDelay);
+                        }
+                    }
+                }
+                // Reset button
+                Rectangle {
+                    width: 28; height: 28; radius: 4; color: delReset.containsMouse ? "#555577" : "#333355"
+                    Text { text: "\u21BA"; color: "#FFF"; font.pixelSize: 14; anchors.centerIn: parent }
+                    MouseArea { id: delReset; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            dualPanel.secDelay = 0.0;
+                            mpv.setProperty("secondary-sub-delay", "0");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     //
     // Err dialog
     //
@@ -757,6 +1562,9 @@ ApplicationWindow {
             console.log("Skipping launch of streaming server under --development");
         else 
             launchServer();
+
+        // Start DualSubtitles addon server
+        launchAddonServer();
 
         // Handle file opens
         var lastArg = args[1]; // not actually last, but we want to be consistent with what happens when we open

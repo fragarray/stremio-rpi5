@@ -2,7 +2,6 @@
 
 const { getConfig } = require('./config');
 const { getMpvColor } = require('./colors');
-const { generateAss } = require('./assGenerator');
 const {
   searchSubtitles,
   downloadSubtitle,
@@ -11,8 +10,11 @@ const {
 } = require('./subtitleFetcher');
 const Cache = require('./cache');
 
-// Cache for generated/fetched subtitle files
-const fileCache = new Cache(10 * 60 * 1000); // 10 minutes
+// Cache for dual info (secondary URL + style), keyed by videoKey
+const dualInfoCache = new Cache(30 * 60 * 1000); // 30 minutes
+
+// Store last-used user config so /dual-fetch/ can reuse it
+let lastUserConfig = null;
 
 /**
  * Create the subtitle handler function for the stremio addon.
@@ -24,6 +26,7 @@ function createSubtitleHandler(addonBaseUrl) {
     const { type, id, config: userConfig, extra } = args;
 
     const cfg = getConfig(userConfig);
+    lastUserConfig = cfg;
     const imdbId = extractImdbId(id);
     if (!imdbId) {
       console.log(`[DualSub] No IMDb ID found in: ${id}`);
@@ -33,7 +36,6 @@ function createSubtitleHandler(addonBaseUrl) {
     console.log(`[DualSub] Request: type=${type}, id=${id}, primary=${cfg.primaryLanguage}, secondary=${cfg.secondaryLanguage}`);
 
     // Query the community OpenSubtitles addon — uses standard Stremio addon protocol
-    // The addon handles series IDs (tt1234567:1:2) natively, no need to filter
     const results = await searchSubtitles({ type, id });
 
     if (!results || results.length === 0) {
@@ -41,92 +43,80 @@ function createSubtitleHandler(addonBaseUrl) {
       return { subtitles: [] };
     }
 
-    const filtered = results;
-
     // Find best match for each language
-    const primaryMatch = findBestMatch(filtered, cfg.primaryLanguage);
-    const secondaryMatch = findBestMatch(filtered, cfg.secondaryLanguage);
+    const primaryMatch = findBestMatch(results, cfg.primaryLanguage);
+    const secondaryMatch = findBestMatch(results, cfg.secondaryLanguage);
 
     const subtitles = [];
+    const videoKey = id.replace(/[^a-zA-Z0-9_:-]/g, '');
 
-    // If we found BOTH languages, create the dual subtitle entries
-    if (primaryMatch && secondaryMatch) {
-      // Download both subtitle files directly from community addon URLs
-      const [primaryContent, secondaryContent] = await Promise.all([
-        downloadSubtitle(primaryMatch.url),
-        downloadSubtitle(secondaryMatch.url),
-      ]);
+    // Build mpv-compatible style for the secondary subtitle
+    const secondaryStyle = {
+      fontSize: parseInt(cfg.secondaryFontSize, 10),
+      color: getMpvColor(cfg.secondaryColor),
+      borderColor: getMpvColor(cfg.secondaryOutlineColor),
+      borderSize: parseInt(cfg.secondaryOutlineSize, 10),
+      bold: cfg.secondaryBold === 'checked' || cfg.secondaryBold === true,
+    };
 
-      if (primaryContent && secondaryContent) {
-        // Generate ASS for primary with baked-in styles
-        const primaryAss = generateAss(primaryContent, primaryMatch.format, {
-          fontSize: cfg.primaryFontSize,
-          color: cfg.primaryColor,
-          outlineColor: cfg.primaryOutlineColor,
-          outlineSize: cfg.primaryOutlineSize,
-          bold: cfg.primaryBold,
-          lang: cfg.primaryLanguage,
-        });
+    // Collect available languages for the panel
+    const availableLangs = [...new Set(results.map(s => s.lang).filter(Boolean))];
 
-        // Store in cache for serving via HTTP
-        const videoKey = id.replace(/[^a-zA-Z0-9_:-]/g, '');
-        fileCache.set(`primary:${videoKey}`, primaryAss);
-        fileCache.set(`secondary:${videoKey}`, secondaryContent);
-        fileCache.set(`secondaryFormat:${videoKey}`, secondaryMatch.format);
+    // Cache whatever we found (may be partial — null URLs are OK)
+    dualInfoCache.set(videoKey, {
+      primaryUrl: primaryMatch ? primaryMatch.url : null,
+      secondaryUrl: secondaryMatch ? secondaryMatch.url : null,
+      secondaryLang: cfg.secondaryLanguage,
+      style: secondaryStyle,
+      available: availableLangs,
+    });
 
-        // Build secondary style info for the shell
-        const secondaryStyle = {
-          fontSize: parseInt(cfg.secondaryFontSize, 10) * 2, // scale for readability
-          color: getMpvColor(cfg.secondaryColor),
-          outlineColor: getMpvColor(cfg.secondaryOutlineColor),
-          outlineSize: parseInt(cfg.secondaryOutlineSize, 10),
-          bold: cfg.secondaryBold === 'checked' || cfg.secondaryBold === true,
-        };
+    // Always create the DUAL entry when any subtitles exist
+    const dualEntry = {
+      id: `dual-${cfg.primaryLanguage}-${cfg.secondaryLanguage}-${videoKey}`,
+      url: `${addonBaseUrl}/dual-primary/${encodeURIComponent(videoKey)}`,
+      lang: 'DUAL SUBTITLES',
+    };
+    subtitles.push(dualEntry);
 
-        // URL-encode the style as a query parameter so the shell can read it
-        const styleParam = encodeURIComponent(JSON.stringify(secondaryStyle));
-        const secondaryExt = secondaryMatch.format === 'vtt' ? 'vtt' : 'srt';
-
-        // Dual subtitle entries — the shell recognizes the "dual-" prefix
-        subtitles.push({
-          id: `dual-primary-${cfg.primaryLanguage}-${videoKey}`,
-          url: `${addonBaseUrl}/subtitles/${encodeURIComponent(videoKey)}/primary.ass`,
-          lang: `🔀 DUAL: ${cfg.primaryLanguage.toUpperCase()} (bottom) + ${cfg.secondaryLanguage.toUpperCase()} (top)`,
-        });
-
-        // The secondary URL includes style info and secondary URL for the shell to load
-        subtitles.push({
-          id: `dual-secondary-${cfg.secondaryLanguage}-${videoKey}`,
-          url: `${addonBaseUrl}/subtitles/${encodeURIComponent(videoKey)}/secondary.${secondaryExt}?style=${styleParam}`,
-          lang: `🔀 DUAL-SECONDARY: ${cfg.secondaryLanguage.toUpperCase()} (top) — select the DUAL entry above`,
-        });
-      }
-    }
-
-    // Also add individual subtitle entries for normal single-track use
+    // Also add individual subtitle entries — pass through original objects
     if (primaryMatch) {
-      const videoKey = id.replace(/[^a-zA-Z0-9_:-]/g, '');
-      subtitles.push({
-        id: `single-${cfg.primaryLanguage}-${videoKey}`,
-        url: `${addonBaseUrl}/subtitles/${encodeURIComponent(videoKey)}/primary.ass`,
-        lang: `${cfg.primaryLanguage.toUpperCase()} (styled)`,
+      const singlePrimary = Object.assign({}, primaryMatch, {
+        id: `dsub-${primaryMatch.id}-${cfg.primaryLanguage}`,
       });
+      subtitles.push(singlePrimary);
+    }
+    if (secondaryMatch && (!primaryMatch || cfg.primaryLanguage !== cfg.secondaryLanguage)) {
+      const singleSecondary = Object.assign({}, secondaryMatch, {
+        id: `dsub-${secondaryMatch.id}-${cfg.secondaryLanguage}`,
+      });
+      subtitles.push(singleSecondary);
     }
 
     console.log(`[DualSub] Returning ${subtitles.length} subtitle entries for ${imdbId}`);
-    return { subtitles };
+    return { subtitles, cacheMaxAge: 0 };
   };
 }
 
 /**
- * Get cached file content for serving.
+ * Get cached dual info for a videoKey.
+ * If exact match fails, tries prefix match (e.g. tt32420734 matches tt32420734:1:2)
  */
-function getCachedFile(type, videoKey) {
-  return fileCache.get(`${type}:${videoKey}`);
+function getDualInfo(videoKey) {
+  const exact = dualInfoCache.get(videoKey);
+  if (exact) return exact;
+
+  // Prefix match: the shell may only have the IMDb ID without episode numbers
+  for (const [key] of dualInfoCache._store) {
+    if (key.startsWith(videoKey)) {
+      const val = dualInfoCache.get(key);
+      if (val) {
+        console.log(`[DualSub] Prefix match: '${videoKey}' → '${key}'`);
+        return val;
+      }
+    }
+  }
+  return null;
 }
 
-function getCachedSecondaryFormat(videoKey) {
-  return fileCache.get(`secondaryFormat:${videoKey}`) || 'srt';
-}
-
-module.exports = { createSubtitleHandler, getCachedFile, getCachedSecondaryFormat };
+module.exports = { createSubtitleHandler, getDualInfo, getLastUserConfig: () => lastUserConfig };
