@@ -4,7 +4,7 @@ const { addonBuilder, getRouter } = require('stremio-addon-sdk');
 const express = require('express');
 const manifest = require('./src/manifest');
 const { createSubtitleHandler, getDualInfo, getLastUserConfig } = require('./src/subtitleHandler');
-const { downloadSubtitle, guessFormatFromUrl, searchSubtitles, findBestMatch } = require('./src/subtitleFetcher');
+const { downloadSubtitle, guessFormatFromUrl, searchSubtitles, findBestMatch, findAllMatches } = require('./src/subtitleFetcher');
 
 // Convert SRT content to ASS with custom styling
 function srtToAss(srt, style) {
@@ -20,14 +20,14 @@ function srtToAss(srt, style) {
   const bld = style.bold ? -1 : 0;
   const align = style.alignment || 8;
 
-  let ass = '[Script Info]\n';
+  let ass = '\uFEFF[Script Info]\n';
   ass += 'ScriptType: v4.00+\n';
   ass += 'PlayResX: 1920\n';
   ass += 'PlayResY: 1080\n';
   ass += 'WrapStyle: 0\n\n';
   ass += '[V4+ Styles]\n';
   ass += 'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n';
-  ass += `Style: Default,Arial,${fs},${pc},${pc},${oc},&H80000000,${bld},0,0,0,100,100,0,0,1,${style.borderSize || 2},0,${align},20,20,15,1\n\n`;
+  ass += `Style: Default,DejaVu Sans,${fs},${pc},${pc},${oc},&H80000000,${bld},0,0,0,100,100,0,0,1,${style.borderSize || 2},0,${align},20,20,15,0\n\n`;
   ass += '[Events]\n';
   ass += 'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n';
 
@@ -142,9 +142,11 @@ app.get('/dual-primary/:videoKey', async (req, res) => {
 
     const format = guessFormatFromUrl(info.primaryUrl);
     const contentType = format === 'vtt' ? 'text/vtt' : 'application/x-subrip';
+    const contentBuf = Buffer.from(content, 'utf8');
     res.setHeader('Content-Type', contentType + '; charset=utf-8');
-    console.log(`[DualSub] Serving primary subtitle (${content.length} bytes, ${format})`);
-    res.send(content);
+    res.setHeader('Content-Length', contentBuf.length);
+    console.log(`[DualSub] Serving primary subtitle (${contentBuf.length} bytes, ${format})`);
+    res.end(contentBuf);
   } catch (err) {
     console.error('[DualSub] Error serving primary subtitle:', err);
     res.status(500).send('Error serving subtitle');
@@ -185,8 +187,11 @@ app.get('/dual-styled-sub', async (req, res) => {
       alignment: parseInt(alignment) || 8, // 8 = top center
     });
 
+    // Send as explicit UTF-8 Buffer to guarantee byte-level correctness
+    const assBuf = Buffer.from(ass, 'utf8');
     res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
-    res.send(ass);
+    res.setHeader('Content-Length', assBuf.length);
+    res.end(assBuf);
   } catch (err) {
     console.error('[DualSub] styled-sub error:', err);
     res.status(500).send('Conversion error');
@@ -217,6 +222,17 @@ app.get('/dual-search/:type/:videoId', async (req, res) => {
     const result = { found: true, videoKey };
     if (primaryMatch) { result.primaryUrl = primaryMatch.url; result.primaryLang = primaryLang; }
     if (secondaryMatch) { result.secondaryUrl = secondaryMatch.url; result.secondaryLang = secondaryLang; }
+
+    // Return all variants per language for variant selection UI
+    const primaryAll = findAllMatches(results, primaryLang);
+    const secondaryAll = findAllMatches(results, secondaryLang);
+    result.primaryVariants = primaryAll.map((s, i) => ({
+      index: i, url: s.url, title: s.id || ('Variant ' + (i + 1))
+    }));
+    result.secondaryVariants = secondaryAll.map((s, i) => ({
+      index: i, url: s.url, title: s.id || ('Variant ' + (i + 1))
+    }));
+
     res.json(result);
   } catch (err) {
     console.error('[DualSub] dual-search error:', err);
@@ -265,19 +281,6 @@ app.get('/dual-fetch/:type/:videoId', async (req, res) => {
     console.error(`[DualSub] dual-fetch error:`, err);
     res.json({ found: false, videoKey, error: err.message });
   }
-});
-
-// Landing page and configuration page
-const landingTemplate = require('stremio-addon-sdk/src/landingTemplate');
-const landingHTML = landingTemplate(manifest);
-
-app.get('/', (req, res) => {
-  res.redirect('/configure');
-});
-
-app.get('/configure', (req, res) => {
-  res.setHeader('Content-Type', 'text/html');
-  res.end(landingHTML);
 });
 
 // Mount the stremio addon SDK router

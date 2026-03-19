@@ -106,7 +106,15 @@ ApplicationWindow {
 
             if (ev === "mpv-command" && args && args[0] !== "run") mpv.command(args)
             if (ev === "mpv-set-prop") {
-                mpv.setProperty(args[0], args[1]);
+                // Block sub-ass-override from web UI when dual subtitles active
+                // (web UI sends no-sub-ass/sub-ass-override that breaks our ASS font styling)
+                if (transport.dualSubtitlesActive &&
+                    (args[0] === "sub-ass-override" || args[0] === "no-sub-ass" ||
+                     args[0] === "secondary-sub-ass-override")) {
+                    console.log("[DualSub] Blocked web UI override: " + args[0] + "=" + args[1]);
+                } else {
+                    mpv.setProperty(args[0], args[1]);
+                }
                 if (args[0] === "pause") {
                     shouldDisableScreensaver(!args[1]);
                 }
@@ -995,22 +1003,33 @@ ApplicationWindow {
     Settings {
         id: dualSettings
         category: "DualSubtitles"
+        // Secondary track settings
         property int fontSize: 20
         property string color: "FFFF00"
         property string borderColor: "000000"
         property int borderSize: 2
         property bool bold: false
         property bool positionTop: true
+        // Primary track settings
+        property int priFontSize: 24
+        property string priColor: "FFFFFF"
+        property string priBorderColor: "000000"
+        property int priBorderSize: 2
+        property bool priBold: true
+        property bool priPositionTop: false
+        // Language settings
         property string primaryLang: "ita"
         property string secondaryLang: "spa"
+        // Letterbox margins
+        property bool useMargins: true
     }
 
     // === DUAL SUBTITLES: Settings Panel ===
     Rectangle {
         id: dualPanel
         visible: false
-        width: 310
-        height: dualPanelCol.height + 32
+        width: 360
+        height: Math.min(dualPanelCol.height + 32, parent.height - 100)
         anchors.right: parent.right
         anchors.top: parent.top
         anchors.rightMargin: 20
@@ -1021,7 +1040,7 @@ ApplicationWindow {
         radius: 10
         z: 1000
 
-        // Settings state
+        // Settings state — secondary track
         property int secFontSize: dualSettings.fontSize
         property string secColor: dualSettings.color
         property string secBorderColor: dualSettings.borderColor
@@ -1029,19 +1048,54 @@ ApplicationWindow {
         property bool secBold: dualSettings.bold
         property bool secPositionTop: dualSettings.positionTop
         property real secDelay: 0.0
+        // Settings state — primary track
+        property int priFontSize: dualSettings.priFontSize
+        property string priColor: dualSettings.priColor
+        property string priBorderColor: dualSettings.priBorderColor
+        property int priBorderSize: dualSettings.priBorderSize
+        property bool priBold: dualSettings.priBold
+        property bool priPositionTop: dualSettings.priPositionTop
+        property real priDelay: 0.0
+        // Language settings
         property string secPrimaryLang: dualSettings.primaryLang
         property string secSecondaryLang: dualSettings.secondaryLang
+        property bool useMargins: dualSettings.useMargins
         property bool langSearching: false
 
-        // Persist settings when changed
+        // Variant tracking: maps lang code -> array of {index, url, title}
+        property var primaryVariants: ({})   // e.g. {"ita": [{index:0, url:"...", title:"..."},...]}
+        property var secondaryVariants: ({})
+        // Currently selected variant index per lang
+        property var primaryVariantIdx: ({})   // e.g. {"ita": 0}
+        property var secondaryVariantIdx: ({})
+
+        // Persist settings when changed — secondary
         onSecFontSizeChanged: dualSettings.fontSize = secFontSize
         onSecColorChanged: dualSettings.color = secColor
         onSecBorderColorChanged: dualSettings.borderColor = secBorderColor
         onSecBorderSizeChanged: dualSettings.borderSize = secBorderSize
         onSecBoldChanged: dualSettings.bold = secBold
         onSecPositionTopChanged: dualSettings.positionTop = secPositionTop
+        // Persist settings when changed — primary
+        onPriFontSizeChanged: dualSettings.priFontSize = priFontSize
+        onPriColorChanged: dualSettings.priColor = priColor
+        onPriBorderColorChanged: dualSettings.priBorderColor = priBorderColor
+        onPriBorderSizeChanged: dualSettings.priBorderSize = priBorderSize
+        onPriBoldChanged: dualSettings.priBold = priBold
+        onPriPositionTopChanged: dualSettings.priPositionTop = priPositionTop
+        // Persist language settings
         onSecPrimaryLangChanged: dualSettings.primaryLang = secPrimaryLang
         onSecSecondaryLangChanged: dualSettings.secondaryLang = secSecondaryLang
+        // Persist margins setting
+        onUseMarginsChanged: {
+            dualSettings.useMargins = useMargins;
+            var val = useMargins ? "yes" : "no";
+            mpv.setProperty("sub-use-margins", val);
+            mpv.setProperty("sub-ass-force-margins", val);
+            mpv.setProperty("secondary-sub-use-margins", val);
+            mpv.setProperty("secondary-sub-ass-force-margins", val);
+            console.log("[DualSub] Letterbox margins: " + val);
+        }
 
         // Hide when dual deactivated
         Connections {
@@ -1089,7 +1143,7 @@ ApplicationWindow {
                 + "&bold=" + (dualPanel.secBold ? "true" : "false")
                 + "&alignment=" + (dualPanel.secPositionTop ? "8" : "2");
             mpv.command(["sub-add", u, "auto", "DualSecondary"]);
-            console.log("[DualSub] Style reload: size=" + secFontSize + " color=#" + secColor + " pos=" + (secPositionTop ? "top" : "bottom"));
+            console.log("[DualSub] Style reload: sec size=" + secFontSize + " color=#" + secColor + " pos=" + (secPositionTop ? "top" : "bottom"));
         }
 
         // Search for subtitles with new secondary language
@@ -1109,9 +1163,24 @@ ApplicationWindow {
                     if (xhr.status === 200) {
                         try {
                             var info = JSON.parse(xhr.responseText);
+                            // Store variants for both languages
+                            if (info.primaryVariants) {
+                                var pv = dualPanel.primaryVariants;
+                                pv[dualPanel.secPrimaryLang] = info.primaryVariants;
+                                dualPanel.primaryVariants = pv;
+                            }
+                            if (info.secondaryVariants) {
+                                var sv = dualPanel.secondaryVariants;
+                                sv[newSecLang] = info.secondaryVariants;
+                                dualPanel.secondaryVariants = sv;
+                            }
                             if (info.found && info.secondaryUrl) {
                                 dualPanel.secSecondaryLang = newSecLang;
                                 transport.dualSecondarySubUrl = info.secondaryUrl;
+                                // Reset variant index for this language
+                                var si = dualPanel.secondaryVariantIdx;
+                                si[newSecLang] = 0;
+                                dualPanel.secondaryVariantIdx = si;
                                 console.log("[DualSub] Language changed, new secondary: " + info.secondaryLang + " " + info.secondaryUrl);
                                 dualPanel.doReload();
                             } else {
@@ -1143,9 +1212,24 @@ ApplicationWindow {
                     if (xhr.status === 200) {
                         try {
                             var info = JSON.parse(xhr.responseText);
+                            // Store variants for both languages
+                            if (info.primaryVariants) {
+                                var pv = dualPanel.primaryVariants;
+                                pv[newPriLang] = info.primaryVariants;
+                                dualPanel.primaryVariants = pv;
+                            }
+                            if (info.secondaryVariants) {
+                                var sv = dualPanel.secondaryVariants;
+                                sv[dualPanel.secSecondaryLang] = info.secondaryVariants;
+                                dualPanel.secondaryVariants = sv;
+                            }
                             if (info.found && info.primaryUrl) {
                                 dualPanel.secPrimaryLang = newPriLang;
                                 transport.dualPrimarySubUrl = info.primaryUrl;
+                                // Reset variant index for this language
+                                var pi = dualPanel.primaryVariantIdx;
+                                pi[newPriLang] = 0;
+                                dualPanel.primaryVariantIdx = pi;
                                 // Also update secondary if returned
                                 if (info.secondaryUrl) transport.dualSecondarySubUrl = info.secondaryUrl;
                                 // Switch to mpv-managed primary
@@ -1180,14 +1264,18 @@ ApplicationWindow {
                 mpv.command(["sub-remove", "" + transport.dualPrimaryTrackId]);
                 transport.dualPrimaryTrackId = -1;
             }
-            // Add new primary (bottom, alignment=2)
+            // Add new primary (using primary panel settings)
             if (transport.dualPrimarySubUrl) {
                 var pu = "http://127.0.0.1:7000/dual-styled-sub?url=" + encodeURIComponent(transport.dualPrimarySubUrl)
-                    + "&fontSize=" + dualPanel.secFontSize
-                    + "&color=FFFFFF&borderColor=000000&borderSize=2&bold=false&alignment=2";
+                    + "&fontSize=" + dualPanel.priFontSize
+                    + "&color=" + dualPanel.priColor
+                    + "&borderColor=" + dualPanel.priBorderColor
+                    + "&borderSize=" + dualPanel.priBorderSize
+                    + "&bold=" + (dualPanel.priBold ? "true" : "false")
+                    + "&alignment=" + (dualPanel.priPositionTop ? "8" : "2");
                 mpv.command(["sub-add", pu, "auto", "DualPrimary"]);
             }
-            // Add new secondary (using panel settings)
+            // Add new secondary (using secondary panel settings)
             if (transport.dualSecondarySubUrl) {
                 var su = "http://127.0.0.1:7000/dual-styled-sub?url=" + encodeURIComponent(transport.dualSecondarySubUrl)
                     + "&fontSize=" + dualPanel.secFontSize
@@ -1198,14 +1286,55 @@ ApplicationWindow {
                     + "&alignment=" + (dualPanel.secPositionTop ? "8" : "2");
                 mpv.command(["sub-add", su, "auto", "DualSecondary"]);
             }
-            console.log("[DualSub] Reloaded both tracks (primary mpv-managed)");
+            console.log("[DualSub] Reloaded both tracks (pri: size=" + priFontSize + " col=#" + priColor + " sec: size=" + secFontSize + " col=#" + secColor + ")");
         }
+
+        // Select a specific variant for primary or secondary language
+        // role: "primary" or "secondary", lang: language code, variantIndex: index in variants array
+        function selectVariant(role, lang, variantIndex) {
+            var variants = role === "primary" ? dualPanel.primaryVariants : dualPanel.secondaryVariants;
+            var langVariants = variants[lang];
+            if (!langVariants || variantIndex < 0 || variantIndex >= langVariants.length) return;
+            var variant = langVariants[variantIndex];
+            if (!variant || !variant.url) return;
+
+            if (role === "primary") {
+                var pi = dualPanel.primaryVariantIdx;
+                pi[lang] = variantIndex;
+                dualPanel.primaryVariantIdx = pi;
+                transport.dualPrimarySubUrl = variant.url;
+                transport.dualPrimaryManaged = true;
+                webView.runJavaScript("(function(){ if(!document.getElementById('dual-hide-overlay')){ var s=document.createElement('style'); s.id='dual-hide-overlay'; s.textContent='video::cue{visibility:hidden!important;color:transparent!important} [class*=\"subtitle\"]{visibility:hidden!important} [class*=\"Subtitle\"]{visibility:hidden!important} [class*=\"cue-\"]{visibility:hidden!important}'; document.head.appendChild(s); }})()");
+                console.log("[DualSub] Primary variant #" + variantIndex + " selected for " + lang);
+                dualPanel.doReloadBoth();
+            } else {
+                var si = dualPanel.secondaryVariantIdx;
+                si[lang] = variantIndex;
+                dualPanel.secondaryVariantIdx = si;
+                transport.dualSecondarySubUrl = variant.url;
+                console.log("[DualSub] Secondary variant #" + variantIndex + " selected for " + lang);
+                dualPanel.doReload();
+            }
+        }
+
+        // Helper: get variant count for a lang
+        function getVariantCount(role, lang) {
+            var variants = role === "primary" ? dualPanel.primaryVariants : dualPanel.secondaryVariants;
+            if (!variants || !variants[lang]) return 0;
+            return variants[lang].length;
+        }
+
+        Flickable {
+            id: dualPanelFlick
+            anchors.fill: parent; anchors.margins: 16
+            contentHeight: dualPanelCol.height
+            clip: true; flickableDirection: Flickable.VerticalFlick
+            boundsBehavior: Flickable.StopAtBounds
 
         Column {
             id: dualPanelCol
-            anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
-            anchors.margins: 16
-            spacing: 10
+            width: dualPanelFlick.width
+            spacing: 8
 
             // --- Title bar ---
             Item {
@@ -1240,12 +1369,48 @@ ApplicationWindow {
                     Repeater {
                         model: ["ita","eng","spa","fre","ger","por","jpn","kor","chi","ara","rus","hin","pol","tur","dut","swe","nor","dan","fin","cze","ron","hun","ell","heb","tha","vie","ind","may","pob","hrv","slv"]
                         Rectangle {
-                            width: priLangText.width + 14; height: 28; radius: 4
-                            color: dualPanel.secPrimaryLang === modelData ? "#44AA44" : "#333355"
-                            border.color: dualPanel.secPrimaryLang === modelData ? "#88FF88" : "#444466"
-                            Text { id: priLangText; text: modelData.toUpperCase(); color: dualPanel.secPrimaryLang === modelData ? "#FFF" : "#AAA"; font.pixelSize: 12; font.bold: dualPanel.secPrimaryLang === modelData; anchors.centerIn: parent }
-                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                onClicked: { if (modelData !== dualPanel.secPrimaryLang) dualPanel.searchPrimaryLanguage(modelData); } }
+                            id: priBtnRect
+                            property int varCount: dualPanel.getVariantCount("primary", modelData)
+                            property string lang: modelData
+                            property bool isSelected: dualPanel.secPrimaryLang === modelData
+                            width: priLangContent.width + 14; height: 28; radius: 4
+                            color: isSelected ? "#44AA44" : "#333355"
+                            border.color: isSelected ? "#88FF88" : "#444466"
+                            Row {
+                                id: priLangContent
+                                anchors.centerIn: parent; spacing: 3
+                                Text { id: priLangText; text: priBtnRect.lang.toUpperCase(); color: priBtnRect.isSelected ? "#FFF" : "#AAA"; font.pixelSize: 12; font.bold: priBtnRect.isSelected; anchors.verticalCenter: parent.verticalCenter }
+                                Row {
+                                    visible: priBtnRect.isSelected && priBtnRect.varCount > 1
+                                    spacing: 2; anchors.verticalCenter: parent.verticalCenter
+                                    Repeater {
+                                        model: priBtnRect.varCount
+                                        Rectangle {
+                                            width: 5; height: 5; radius: 3
+                                            color: {
+                                                var idx = dualPanel.primaryVariantIdx[priBtnRect.lang];
+                                                return (idx !== undefined && idx === index) ? "#FFFFFF" : "#88AA88";
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            MouseArea {
+                                anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                onClicked: { if (priBtnRect.lang !== dualPanel.secPrimaryLang) dualPanel.searchPrimaryLanguage(priBtnRect.lang); }
+                                onPressAndHold: {
+                                    if (priBtnRect.varCount > 1) {
+                                        variantPopup.role = "primary";
+                                        variantPopup.lang = priBtnRect.lang;
+                                        variantPopup.variants = dualPanel.primaryVariants[priBtnRect.lang];
+                                        variantPopup.currentIdx = dualPanel.primaryVariantIdx[priBtnRect.lang] || 0;
+                                        var globalPos = priBtnRect.mapToItem(dualPanel, 0, priBtnRect.height);
+                                        variantPopup.x = Math.min(Math.max(globalPos.x, 8), dualPanel.width - variantPopup.width - 8);
+                                        variantPopup.y = globalPos.y + 4;
+                                        variantPopup.visible = true;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1262,48 +1427,249 @@ ApplicationWindow {
                     Repeater {
                         model: ["ita","eng","spa","fre","ger","por","jpn","kor","chi","ara","rus","hin","pol","tur","dut","swe","nor","dan","fin","cze","ron","hun","ell","heb","tha","vie","ind","may","pob","hrv","slv"]
                         Rectangle {
-                            width: langText2.width + 14; height: 28; radius: 4
-                            color: dualPanel.secSecondaryLang === modelData ? "#4444AA" : "#333355"
-                            border.color: dualPanel.secSecondaryLang === modelData ? "#8888FF" : "#444466"
-                            Text { id: langText2; text: modelData.toUpperCase(); color: dualPanel.secSecondaryLang === modelData ? "#FFF" : "#AAA"; font.pixelSize: 12; font.bold: dualPanel.secSecondaryLang === modelData; anchors.centerIn: parent }
-                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                onClicked: { if (modelData !== dualPanel.secSecondaryLang) dualPanel.searchLanguages(modelData); } }
+                            id: secBtnRect
+                            property int varCount: dualPanel.getVariantCount("secondary", modelData)
+                            property string lang: modelData
+                            property bool isSelected: dualPanel.secSecondaryLang === modelData
+                            width: secLangContent.width + 14; height: 28; radius: 4
+                            color: isSelected ? "#4444AA" : "#333355"
+                            border.color: isSelected ? "#8888FF" : "#444466"
+                            Row {
+                                id: secLangContent
+                                anchors.centerIn: parent; spacing: 3
+                                Text { id: langText2; text: secBtnRect.lang.toUpperCase(); color: secBtnRect.isSelected ? "#FFF" : "#AAA"; font.pixelSize: 12; font.bold: secBtnRect.isSelected; anchors.verticalCenter: parent.verticalCenter }
+                                Row {
+                                    visible: secBtnRect.isSelected && secBtnRect.varCount > 1
+                                    spacing: 2; anchors.verticalCenter: parent.verticalCenter
+                                    Repeater {
+                                        model: secBtnRect.varCount
+                                        Rectangle {
+                                            width: 5; height: 5; radius: 3
+                                            color: {
+                                                var idx = dualPanel.secondaryVariantIdx[secBtnRect.lang];
+                                                return (idx !== undefined && idx === index) ? "#FFFFFF" : "#8888AA";
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            MouseArea {
+                                anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                onClicked: { if (secBtnRect.lang !== dualPanel.secSecondaryLang) dualPanel.searchLanguages(secBtnRect.lang); }
+                                onPressAndHold: {
+                                    if (secBtnRect.varCount > 1) {
+                                        variantPopup.role = "secondary";
+                                        variantPopup.lang = secBtnRect.lang;
+                                        variantPopup.variants = dualPanel.secondaryVariants[secBtnRect.lang];
+                                        variantPopup.currentIdx = dualPanel.secondaryVariantIdx[secBtnRect.lang] || 0;
+                                        var globalPos = secBtnRect.mapToItem(dualPanel, 0, secBtnRect.height);
+                                        variantPopup.x = Math.min(Math.max(globalPos.x, 8), dualPanel.width - variantPopup.width - 8);
+                                        variantPopup.y = globalPos.y + 4;
+                                        variantPopup.visible = true;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
 
+            // --- Letterbox Margins Toggle ---
             Rectangle { width: parent.width; height: 1; color: "#444466" }
-
-            // --- Font Size ---
             Row {
-                spacing: 8
-                Text { text: "Dimensione"; color: "#BBBBBB"; font.pixelSize: 13; width: 90; anchors.verticalCenter: parent.verticalCenter }
+                spacing: 10; width: parent.width
+                Text { text: "Sottotitoli fuori video (letterbox)"; color: "#BBBBBB"; font.pixelSize: 12; anchors.verticalCenter: parent.verticalCenter }
                 Rectangle {
-                    width: 32; height: 28; radius: 4; color: fsMinus.containsMouse ? "#555577" : "#333355"
-                    Text { text: "\u2212"; color: "#FFF"; font.pixelSize: 16; anchors.centerIn: parent }
-                    MouseArea { id: fsMinus; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                        onClicked: { if (dualPanel.secFontSize > 10) { dualPanel.secFontSize -= 2; dualPanel.scheduleReload(); } } }
-                }
-                Text { text: dualPanel.secFontSize; color: "#FFF"; font.pixelSize: 15; width: 30;
-                    horizontalAlignment: Text.AlignHCenter; anchors.verticalCenter: parent.verticalCenter }
-                Rectangle {
-                    width: 32; height: 28; radius: 4; color: fsPlus.containsMouse ? "#555577" : "#333355"
-                    Text { text: "+"; color: "#FFF"; font.pixelSize: 16; anchors.centerIn: parent }
-                    MouseArea { id: fsPlus; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                        onClicked: { if (dualPanel.secFontSize < 60) { dualPanel.secFontSize += 2; dualPanel.scheduleReload(); } } }
+                    width: 44; height: 22; radius: 11; anchors.verticalCenter: parent.verticalCenter
+                    color: dualPanel.useMargins ? "#44AA44" : "#555555"
+                    Rectangle {
+                        width: 18; height: 18; radius: 9
+                        color: "#FFFFFF"
+                        x: dualPanel.useMargins ? parent.width - width - 2 : 2
+                        anchors.verticalCenter: parent.verticalCenter
+                        Behavior on x { NumberAnimation { duration: 150 } }
+                    }
+                    MouseArea {
+                        anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                        onClicked: dualPanel.useMargins = !dualPanel.useMargins
+                    }
                 }
             }
 
-            // --- Font Color ---
-            Text { text: "Colore testo"; color: "#BBBBBB"; font.pixelSize: 13 }
+            // ════════════════════════════════════════════
+            // PRIMARY TRACK SETTINGS
+            // ════════════════════════════════════════════
+            Rectangle { width: parent.width; height: 1; color: "#446644" }
+            Text { text: "\u25BC Primaria \u2014 Stile"; color: "#88DD88"; font.pixelSize: 13; font.bold: true }
+
+            // --- Primary Font Size ---
+            Row {
+                spacing: 8
+                Text { text: "Dimensione"; color: "#BBBBBB"; font.pixelSize: 12; width: 90; anchors.verticalCenter: parent.verticalCenter }
+                Rectangle {
+                    width: 28; height: 26; radius: 4; color: priFsMinus.containsMouse ? "#555577" : "#333355"
+                    Text { text: "\u2212"; color: "#FFF"; font.pixelSize: 14; anchors.centerIn: parent }
+                    MouseArea { id: priFsMinus; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                        onClicked: { if (dualPanel.priFontSize > 10) { dualPanel.priFontSize -= 2; dualPanel.scheduleReload(); } } }
+                }
+                Text { text: dualPanel.priFontSize; color: "#FFF"; font.pixelSize: 14; width: 30;
+                    horizontalAlignment: Text.AlignHCenter; anchors.verticalCenter: parent.verticalCenter }
+                Rectangle {
+                    width: 28; height: 26; radius: 4; color: priFsPlus.containsMouse ? "#555577" : "#333355"
+                    Text { text: "+"; color: "#FFF"; font.pixelSize: 14; anchors.centerIn: parent }
+                    MouseArea { id: priFsPlus; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                        onClicked: { if (dualPanel.priFontSize < 120) { dualPanel.priFontSize += 2; dualPanel.scheduleReload(); } } }
+                }
+            }
+
+            // --- Primary Font Color ---
+            Row {
+                spacing: 4
+                Text { text: "Colore"; color: "#BBBBBB"; font.pixelSize: 12; width: 48; anchors.verticalCenter: parent.verticalCenter }
+                Repeater {
+                    model: ["FFFFFF", "FFFF00", "00FF00", "00FFFF", "FF6600", "FF0000", "FF69B4"]
+                    Rectangle {
+                        width: 26; height: 26; radius: 13; color: "#" + modelData
+                        border.color: dualPanel.priColor === modelData ? "#FFFFFF" : "#555555"
+                        border.width: dualPanel.priColor === modelData ? 3 : 1
+                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                            onClicked: { dualPanel.priColor = modelData; dualPanel.scheduleReload(); } }
+                    }
+                }
+            }
+
+            // --- Primary Border Color + Size ---
+            Row {
+                spacing: 4
+                Text { text: "Bordo"; color: "#BBBBBB"; font.pixelSize: 12; width: 48; anchors.verticalCenter: parent.verticalCenter }
+                Repeater {
+                    model: ["000000", "FFFFFF", "555555", "000088", "880000"]
+                    Rectangle {
+                        width: 26; height: 26; radius: 13; color: "#" + modelData
+                        border.color: dualPanel.priBorderColor === modelData ? "#FFFF00" : "#777777"
+                        border.width: dualPanel.priBorderColor === modelData ? 3 : 1
+                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                            onClicked: { dualPanel.priBorderColor = modelData; dualPanel.scheduleReload(); } }
+                    }
+                }
+                Text { text: "|"; color: "#444466"; font.pixelSize: 14; anchors.verticalCenter: parent.verticalCenter }
+                Rectangle {
+                    width: 24; height: 26; radius: 4; color: priBsMinus.containsMouse ? "#555577" : "#333355"
+                    Text { text: "\u2212"; color: "#FFF"; font.pixelSize: 12; anchors.centerIn: parent }
+                    MouseArea { id: priBsMinus; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                        onClicked: { if (dualPanel.priBorderSize > 0) { dualPanel.priBorderSize--; dualPanel.scheduleReload(); } } }
+                }
+                Text { text: dualPanel.priBorderSize; color: "#FFF"; font.pixelSize: 13; width: 14;
+                    horizontalAlignment: Text.AlignHCenter; anchors.verticalCenter: parent.verticalCenter }
+                Rectangle {
+                    width: 24; height: 26; radius: 4; color: priBsPlus.containsMouse ? "#555577" : "#333355"
+                    Text { text: "+"; color: "#FFF"; font.pixelSize: 12; anchors.centerIn: parent }
+                    MouseArea { id: priBsPlus; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                        onClicked: { if (dualPanel.priBorderSize < 6) { dualPanel.priBorderSize++; dualPanel.scheduleReload(); } } }
+                }
+            }
+
+            // --- Primary Bold + Position ---
             Row {
                 spacing: 6
+                Rectangle {
+                    width: 50; height: 26; radius: 4
+                    color: dualPanel.priBold ? "#44AA44" : "#333355"
+                    border.color: dualPanel.priBold ? "#66CC66" : "#444466"
+                    Text { text: "B"; color: "#FFF"; font.pixelSize: 13; font.bold: true; anchors.centerIn: parent }
+                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                        onClicked: { dualPanel.priBold = !dualPanel.priBold; dualPanel.scheduleReload(); } }
+                }
+                Rectangle {
+                    width: 60; height: 26; radius: 4
+                    color: !dualPanel.priPositionTop ? "#44AA44" : "#333355"
+                    border.color: !dualPanel.priPositionTop ? "#66CC66" : "#444466"
+                    Text { text: "\u2193 Basso"; color: "#FFF"; font.pixelSize: 12; anchors.centerIn: parent }
+                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                        onClicked: { dualPanel.priPositionTop = false; dualPanel.scheduleReload(); } }
+                }
+                Rectangle {
+                    width: 55; height: 26; radius: 4
+                    color: dualPanel.priPositionTop ? "#44AA44" : "#333355"
+                    border.color: dualPanel.priPositionTop ? "#66CC66" : "#444466"
+                    Text { text: "\u2191 Alto"; color: "#FFF"; font.pixelSize: 12; anchors.centerIn: parent }
+                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                        onClicked: { dualPanel.priPositionTop = true; dualPanel.scheduleReload(); } }
+                }
+            }
+
+            // --- Primary Delay ---
+            Row {
+                spacing: 6
+                Text { text: "Ritardo"; color: "#BBBBBB"; font.pixelSize: 12; width: 52; anchors.verticalCenter: parent.verticalCenter }
+                Rectangle {
+                    width: 28; height: 26; radius: 4; color: priDelMinus.containsMouse ? "#555577" : "#333355"
+                    Text { text: "\u2212"; color: "#FFF"; font.pixelSize: 14; anchors.centerIn: parent }
+                    MouseArea { id: priDelMinus; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            dualPanel.priDelay = Math.round((dualPanel.priDelay - 0.1) * 10) / 10;
+                            mpv.setProperty("sub-delay", "" + dualPanel.priDelay);
+                        }
+                    }
+                }
+                Text {
+                    text: (dualPanel.priDelay >= 0 ? "+" : "") + dualPanel.priDelay.toFixed(1) + "s"
+                    color: "#FFF"; font.pixelSize: 13; width: 48
+                    horizontalAlignment: Text.AlignHCenter; anchors.verticalCenter: parent.verticalCenter
+                }
+                Rectangle {
+                    width: 28; height: 26; radius: 4; color: priDelPlus.containsMouse ? "#555577" : "#333355"
+                    Text { text: "+"; color: "#FFF"; font.pixelSize: 14; anchors.centerIn: parent }
+                    MouseArea { id: priDelPlus; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            dualPanel.priDelay = Math.round((dualPanel.priDelay + 0.1) * 10) / 10;
+                            mpv.setProperty("sub-delay", "" + dualPanel.priDelay);
+                        }
+                    }
+                }
+                Rectangle {
+                    width: 24; height: 26; radius: 4; color: priDelReset.containsMouse ? "#555577" : "#333355"
+                    Text { text: "\u21BA"; color: "#FFF"; font.pixelSize: 13; anchors.centerIn: parent }
+                    MouseArea { id: priDelReset; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                        onClicked: { dualPanel.priDelay = 0.0; mpv.setProperty("sub-delay", "0"); }
+                    }
+                }
+            }
+
+            // ════════════════════════════════════════════
+            // SECONDARY TRACK SETTINGS
+            // ════════════════════════════════════════════
+            Rectangle { width: parent.width; height: 1; color: "#444488" }
+            Text { text: "\u25BC Secondaria \u2014 Stile"; color: "#8888DD"; font.pixelSize: 13; font.bold: true }
+
+            // --- Secondary Font Size ---
+            Row {
+                spacing: 8
+                Text { text: "Dimensione"; color: "#BBBBBB"; font.pixelSize: 12; width: 90; anchors.verticalCenter: parent.verticalCenter }
+                Rectangle {
+                    width: 28; height: 26; radius: 4; color: fsMinus.containsMouse ? "#555577" : "#333355"
+                    Text { text: "\u2212"; color: "#FFF"; font.pixelSize: 14; anchors.centerIn: parent }
+                    MouseArea { id: fsMinus; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                        onClicked: { if (dualPanel.secFontSize > 10) { dualPanel.secFontSize -= 2; dualPanel.scheduleReload(); } } }
+                }
+                Text { text: dualPanel.secFontSize; color: "#FFF"; font.pixelSize: 14; width: 30;
+                    horizontalAlignment: Text.AlignHCenter; anchors.verticalCenter: parent.verticalCenter }
+                Rectangle {
+                    width: 28; height: 26; radius: 4; color: fsPlus.containsMouse ? "#555577" : "#333355"
+                    Text { text: "+"; color: "#FFF"; font.pixelSize: 14; anchors.centerIn: parent }
+                    MouseArea { id: fsPlus; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                        onClicked: { if (dualPanel.secFontSize < 120) { dualPanel.secFontSize += 2; dualPanel.scheduleReload(); } } }
+                }
+            }
+
+            // --- Secondary Font Color ---
+            Row {
+                spacing: 4
+                Text { text: "Colore"; color: "#BBBBBB"; font.pixelSize: 12; width: 48; anchors.verticalCenter: parent.verticalCenter }
                 Repeater {
                     model: ["FFFF00", "FFFFFF", "00FF00", "00FFFF", "FF6600", "FF0000", "FF69B4"]
                     Rectangle {
-                        width: 30; height: 30; radius: 15
-                        color: "#" + modelData
+                        width: 26; height: 26; radius: 13; color: "#" + modelData
                         border.color: dualPanel.secColor === modelData ? "#FFFFFF" : "#555555"
                         border.width: dualPanel.secColor === modelData ? 3 : 1
                         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
@@ -1312,88 +1678,73 @@ ApplicationWindow {
                 }
             }
 
-            // --- Border Color ---
-            Text { text: "Colore bordo"; color: "#BBBBBB"; font.pixelSize: 13 }
+            // --- Secondary Border Color + Size ---
             Row {
-                spacing: 6
+                spacing: 4
+                Text { text: "Bordo"; color: "#BBBBBB"; font.pixelSize: 12; width: 48; anchors.verticalCenter: parent.verticalCenter }
                 Repeater {
                     model: ["000000", "FFFFFF", "555555", "000088", "880000"]
                     Rectangle {
-                        width: 30; height: 30; radius: 15
-                        color: "#" + modelData
+                        width: 26; height: 26; radius: 13; color: "#" + modelData
                         border.color: dualPanel.secBorderColor === modelData ? "#FFFF00" : "#777777"
                         border.width: dualPanel.secBorderColor === modelData ? 3 : 1
                         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                             onClicked: { dualPanel.secBorderColor = modelData; dualPanel.scheduleReload(); } }
                     }
                 }
-            }
-
-            // --- Border Size ---
-            Row {
-                spacing: 8
-                Text { text: "Spessore bordo"; color: "#BBBBBB"; font.pixelSize: 13; width: 110; anchors.verticalCenter: parent.verticalCenter }
+                Text { text: "|"; color: "#444466"; font.pixelSize: 14; anchors.verticalCenter: parent.verticalCenter }
                 Rectangle {
-                    width: 32; height: 28; radius: 4; color: bsMinus.containsMouse ? "#555577" : "#333355"
-                    Text { text: "\u2212"; color: "#FFF"; font.pixelSize: 16; anchors.centerIn: parent }
+                    width: 24; height: 26; radius: 4; color: bsMinus.containsMouse ? "#555577" : "#333355"
+                    Text { text: "\u2212"; color: "#FFF"; font.pixelSize: 12; anchors.centerIn: parent }
                     MouseArea { id: bsMinus; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                         onClicked: { if (dualPanel.secBorderSize > 0) { dualPanel.secBorderSize--; dualPanel.scheduleReload(); } } }
                 }
-                Text { text: dualPanel.secBorderSize; color: "#FFF"; font.pixelSize: 15; width: 20;
+                Text { text: dualPanel.secBorderSize; color: "#FFF"; font.pixelSize: 13; width: 14;
                     horizontalAlignment: Text.AlignHCenter; anchors.verticalCenter: parent.verticalCenter }
                 Rectangle {
-                    width: 32; height: 28; radius: 4; color: bsPlus.containsMouse ? "#555577" : "#333355"
-                    Text { text: "+"; color: "#FFF"; font.pixelSize: 16; anchors.centerIn: parent }
+                    width: 24; height: 26; radius: 4; color: bsPlus.containsMouse ? "#555577" : "#333355"
+                    Text { text: "+"; color: "#FFF"; font.pixelSize: 12; anchors.centerIn: parent }
                     MouseArea { id: bsPlus; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                         onClicked: { if (dualPanel.secBorderSize < 6) { dualPanel.secBorderSize++; dualPanel.scheduleReload(); } } }
                 }
             }
 
-            // --- Bold ---
+            // --- Secondary Bold + Position ---
             Row {
-                spacing: 8
-                Text { text: "Grassetto"; color: "#BBBBBB"; font.pixelSize: 13; width: 90; anchors.verticalCenter: parent.verticalCenter }
+                spacing: 6
                 Rectangle {
-                    width: 60; height: 28; radius: 4
+                    width: 50; height: 26; radius: 4
                     color: dualPanel.secBold ? "#4444AA" : "#333355"
                     border.color: dualPanel.secBold ? "#6666CC" : "#444466"
-                    Text { text: dualPanel.secBold ? "ON" : "OFF"; color: "#FFF"; font.pixelSize: 13; font.bold: true; anchors.centerIn: parent }
+                    Text { text: "B"; color: "#FFF"; font.pixelSize: 13; font.bold: true; anchors.centerIn: parent }
                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                         onClicked: { dualPanel.secBold = !dualPanel.secBold; dualPanel.scheduleReload(); } }
                 }
-            }
-
-            // --- Position ---
-            Row {
-                spacing: 8
-                Text { text: "Posizione"; color: "#BBBBBB"; font.pixelSize: 13; width: 90; anchors.verticalCenter: parent.verticalCenter }
                 Rectangle {
-                    width: 70; height: 28; radius: 4
-                    color: dualPanel.secPositionTop ? "#4444AA" : "#333355"
-                    border.color: dualPanel.secPositionTop ? "#6666CC" : "#444466"
-                    Text { text: "\u2191 Alto"; color: "#FFF"; font.pixelSize: 13; anchors.centerIn: parent }
-                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                        onClicked: { dualPanel.secPositionTop = true; dualPanel.scheduleReload(); } }
-                }
-                Rectangle {
-                    width: 70; height: 28; radius: 4
+                    width: 60; height: 26; radius: 4
                     color: !dualPanel.secPositionTop ? "#4444AA" : "#333355"
                     border.color: !dualPanel.secPositionTop ? "#6666CC" : "#444466"
-                    Text { text: "\u2193 Basso"; color: "#FFF"; font.pixelSize: 13; anchors.centerIn: parent }
+                    Text { text: "\u2193 Basso"; color: "#FFF"; font.pixelSize: 12; anchors.centerIn: parent }
                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                         onClicked: { dualPanel.secPositionTop = false; dualPanel.scheduleReload(); } }
                 }
+                Rectangle {
+                    width: 55; height: 26; radius: 4
+                    color: dualPanel.secPositionTop ? "#4444AA" : "#333355"
+                    border.color: dualPanel.secPositionTop ? "#6666CC" : "#444466"
+                    Text { text: "\u2191 Alto"; color: "#FFF"; font.pixelSize: 12; anchors.centerIn: parent }
+                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                        onClicked: { dualPanel.secPositionTop = true; dualPanel.scheduleReload(); } }
+                }
             }
 
-            Rectangle { width: parent.width; height: 1; color: "#444466" }
-
-            // --- Delay (live, no reload) ---
+            // --- Secondary Delay ---
             Row {
-                spacing: 8
-                Text { text: "Ritardo"; color: "#BBBBBB"; font.pixelSize: 13; width: 90; anchors.verticalCenter: parent.verticalCenter }
+                spacing: 6
+                Text { text: "Ritardo"; color: "#BBBBBB"; font.pixelSize: 12; width: 52; anchors.verticalCenter: parent.verticalCenter }
                 Rectangle {
-                    width: 32; height: 28; radius: 4; color: delMinus.containsMouse ? "#555577" : "#333355"
-                    Text { text: "\u2212"; color: "#FFF"; font.pixelSize: 16; anchors.centerIn: parent }
+                    width: 28; height: 26; radius: 4; color: delMinus.containsMouse ? "#555577" : "#333355"
+                    Text { text: "\u2212"; color: "#FFF"; font.pixelSize: 14; anchors.centerIn: parent }
                     MouseArea { id: delMinus; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                         onClicked: {
                             dualPanel.secDelay = Math.round((dualPanel.secDelay - 0.1) * 10) / 10;
@@ -1403,12 +1754,12 @@ ApplicationWindow {
                 }
                 Text {
                     text: (dualPanel.secDelay >= 0 ? "+" : "") + dualPanel.secDelay.toFixed(1) + "s"
-                    color: "#FFF"; font.pixelSize: 14; width: 50
+                    color: "#FFF"; font.pixelSize: 13; width: 48
                     horizontalAlignment: Text.AlignHCenter; anchors.verticalCenter: parent.verticalCenter
                 }
                 Rectangle {
-                    width: 32; height: 28; radius: 4; color: delPlus.containsMouse ? "#555577" : "#333355"
-                    Text { text: "+"; color: "#FFF"; font.pixelSize: 16; anchors.centerIn: parent }
+                    width: 28; height: 26; radius: 4; color: delPlus.containsMouse ? "#555577" : "#333355"
+                    Text { text: "+"; color: "#FFF"; font.pixelSize: 14; anchors.centerIn: parent }
                     MouseArea { id: delPlus; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                         onClicked: {
                             dualPanel.secDelay = Math.round((dualPanel.secDelay + 0.1) * 10) / 10;
@@ -1416,14 +1767,123 @@ ApplicationWindow {
                         }
                     }
                 }
-                // Reset button
                 Rectangle {
-                    width: 28; height: 28; radius: 4; color: delReset.containsMouse ? "#555577" : "#333355"
-                    Text { text: "\u21BA"; color: "#FFF"; font.pixelSize: 14; anchors.centerIn: parent }
+                    width: 24; height: 26; radius: 4; color: delReset.containsMouse ? "#555577" : "#333355"
+                    Text { text: "\u21BA"; color: "#FFF"; font.pixelSize: 13; anchors.centerIn: parent }
                     MouseArea { id: delReset; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                        onClicked: {
-                            dualPanel.secDelay = 0.0;
-                            mpv.setProperty("secondary-sub-delay", "0");
+                        onClicked: { dualPanel.secDelay = 0.0; mpv.setProperty("secondary-sub-delay", "0"); }
+                    }
+                }
+            }
+        }
+        } // end Flickable
+
+        // --- Variant selection popup (long-press dropdown) ---
+        Rectangle {
+            id: variantPopup
+            visible: false
+            width: 270
+            height: variantCol.height + 16
+            color: "#F0222244"
+            border.color: "#7777AA"
+            border.width: 1
+            radius: 8
+            z: 1100
+
+            property string role: ""       // "primary" or "secondary"
+            property string lang: ""
+            property var variants: []
+            property int currentIdx: 0
+
+            // Close on click outside
+            MouseArea {
+                anchors.fill: parent
+                // Absorb clicks inside the popup so they don't close it
+                onClicked: {}
+            }
+
+            Column {
+                id: variantCol
+                anchors.left: parent.left; anchors.right: parent.right
+                anchors.top: parent.top; anchors.margins: 8
+                spacing: 2
+
+                // Header
+                Item {
+                    width: parent.width; height: 22
+                    Text {
+                        text: variantPopup.lang.toUpperCase() + " \u2014 " + (variantPopup.variants ? variantPopup.variants.length : 0) + " versioni"
+                        color: "#CCCCCC"; font.pixelSize: 12; font.bold: true
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+                    Text {
+                        text: "\u2715"; color: vpCloseMa.containsMouse ? "#FFF" : "#888"
+                        font.pixelSize: 14; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                        MouseArea {
+                            id: vpCloseMa; anchors.fill: parent; anchors.margins: -4
+                            hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                            onClicked: variantPopup.visible = false
+                        }
+                    }
+                }
+                Rectangle { width: parent.width; height: 1; color: "#555577" }
+
+                // Scrollable variant list
+                Flickable {
+                    width: parent.width
+                    height: Math.min(variantListCol.height, 200)
+                    contentHeight: variantListCol.height
+                    clip: true; flickableDirection: Flickable.VerticalFlick
+
+                    Column {
+                        id: variantListCol
+                        width: parent.width; spacing: 1
+
+                        Repeater {
+                            model: variantPopup.variants ? variantPopup.variants.length : 0
+                            Rectangle {
+                                width: variantListCol.width; height: 28; radius: 3
+                                property bool isCurrent: index === variantPopup.currentIdx
+                                color: isCurrent ? (variantPopup.role === "primary" ? "#44AA44" : "#4444AA")
+                                     : vpItemMa.containsMouse ? "#444466" : "transparent"
+
+                                Row {
+                                    anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8
+                                    spacing: 6; anchors.verticalCenter: parent.verticalCenter
+
+                                    // Filled/empty dot
+                                    Rectangle {
+                                        width: 6; height: 6; radius: 3; anchors.verticalCenter: parent.verticalCenter
+                                        color: isCurrent ? "#FFFFFF" : "#666688"
+                                    }
+
+                                    Text {
+                                        property var v: variantPopup.variants ? variantPopup.variants[index] : null
+                                        text: {
+                                            if (!v) return "";
+                                            // Shorten the title for display
+                                            var t = v.title || ("Variant " + (index + 1));
+                                            return (index + 1) + ". " + (t.length > 38 ? t.substring(0, 38) + "\u2026" : t);
+                                        }
+                                        color: isCurrent ? "#FFFFFF" : "#BBBBCC"
+                                        font.pixelSize: 11
+                                        font.bold: isCurrent
+                                        elide: Text.ElideRight
+                                        width: parent.width - 22
+                                        anchors.verticalCenter: parent.verticalCenter
+                                    }
+                                }
+
+                                MouseArea {
+                                    id: vpItemMa; anchors.fill: parent
+                                    hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        dualPanel.selectVariant(variantPopup.role, variantPopup.lang, index);
+                                        variantPopup.currentIdx = index;
+                                        variantPopup.visible = false;
+                                    }
+                                }
+                            }
                         }
                     }
                 }

@@ -44,25 +44,70 @@ async function searchSubtitles({ type, id }) {
 }
 
 /**
+ * Extract charset from Content-Type header, e.g. "text/plain; charset=iso-8859-1" → "iso-8859-1"
+ */
+function extractCharset(contentType) {
+  if (!contentType) return null;
+  const m = contentType.match(/charset\s*=\s*([\w-]+)/i);
+  return m ? m[1].toLowerCase() : null;
+}
+
+/**
+ * Detect encoding from raw bytes: check BOM, then try UTF-8 validation.
+ * Returns the encoding label suitable for TextDecoder.
+ */
+function detectEncoding(buf) {
+  const bytes = new Uint8Array(buf);
+  // UTF-8 BOM
+  if (bytes.length >= 3 && bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) return 'utf-8';
+  // UTF-16 LE BOM
+  if (bytes.length >= 2 && bytes[0] === 0xFF && bytes[1] === 0xFE) return 'utf-16le';
+  // UTF-16 BE BOM
+  if (bytes.length >= 2 && bytes[0] === 0xFE && bytes[1] === 0xFF) return 'utf-16be';
+
+  // Try decoding as UTF-8 — if replacement characters appear, it's not valid UTF-8
+  const trial = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+  if (!trial.includes('\uFFFD')) return 'utf-8';
+
+  // Fallback: Windows-1252 covers most Western European accented characters
+  return 'windows-1252';
+}
+
+/**
  * Download a subtitle file from its URL.
- * The URLs come from the community addon and point to subs.strem.io — already UTF-8 encoded.
+ * Handles encoding detection: checks HTTP Content-Type charset, BOM, and UTF-8 validity.
+ * Falls back to Windows-1252 for files with accented characters that aren't valid UTF-8.
  *
  * @param {string} url - Direct URL to the subtitle file
- * @returns {Promise<string|null>} Subtitle file content or null on error
+ * @returns {Promise<string|null>} Subtitle file content (always valid UTF-8 string) or null on error
  */
 async function downloadSubtitle(url) {
   const cacheKey = `download:${url}`;
   const cached = downloadCache.get(cacheKey);
   if (cached) return cached;
 
+  // Strip Stremio's broken server-side encoding conversion — we handle encoding ourselves
+  const rawUrl = url.replace(/\/subencoding-stremio-utf8\//, '/');
+
   try {
-    console.log(`[DualSub] Downloading: ${url}`);
-    const response = await fetch(url, { timeout: 15000 });
+    console.log(`[DualSub] Downloading: ${rawUrl}`);
+    const response = await fetch(rawUrl, { timeout: 15000 });
     if (!response.ok) {
       console.error(`[DualSub] Download error: ${response.status} ${response.statusText}`);
       return null;
     }
-    const content = await response.text();
+
+    // Read raw bytes to handle encoding properly
+    const buf = await response.arrayBuffer();
+
+    // Determine encoding: auto-detect from bytes (most reliable), fall back to HTTP header
+    const headerCharset = extractCharset(response.headers.get('content-type'));
+    const detectedEncoding = detectEncoding(buf);
+    const encoding = detectedEncoding;
+
+    const content = new TextDecoder(encoding, { fatal: false }).decode(buf);
+    console.log(`[DualSub] Downloaded ${buf.byteLength} bytes, encoding: ${encoding} (detected: ${detectedEncoding}, header: ${headerCharset || 'none'})`);
+
     downloadCache.set(cacheKey, content);
     return content;
   } catch (err) {
@@ -81,6 +126,14 @@ function findBestMatch(results, language) {
   if (!match) return null;
   // Return the FULL original object — the web UI may depend on extra fields
   return Object.assign({}, match);
+}
+
+/**
+ * Find ALL subtitle matches for a specific language.
+ * Returns an array of {id, url, lang, SubFileName, ...} objects.
+ */
+function findAllMatches(results, language) {
+  return results.filter(s => s.lang === language).map(s => Object.assign({}, s));
 }
 
 /**
@@ -109,6 +162,7 @@ module.exports = {
   searchSubtitles,
   downloadSubtitle,
   findBestMatch,
+  findAllMatches,
   guessFormatFromUrl,
   extractImdbId,
 };

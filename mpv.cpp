@@ -177,6 +177,22 @@ void MpvObject::initialize_mpv() {
     // User-visible stream title used by some audio APIs (at least PulseAudio and wasapi).
     mpv::qt::set_property(mpv, "title", QCoreApplication::applicationName());
 
+    // Allow subtitles to render in video margins (letterbox black bars)
+    mpv::qt::set_property(mpv, "sub-use-margins", "yes");
+    mpv::qt::set_property(mpv, "sub-ass-force-margins", "yes");
+    mpv::qt::set_property(mpv, "secondary-sub-use-margins", "yes");
+    mpv::qt::set_property(mpv, "secondary-sub-ass-force-margins", "yes");
+
+    // Subtitle encoding: force UTF-8 for all subtitle tracks
+    mpv::qt::set_property(mpv, "sub-codepage", "utf-8");
+
+    // Default subtitle font for non-ASS subs and fallback
+    mpv::qt::set_property(mpv, "sub-font", "DejaVu Sans");
+
+    // Preserve ASS styling (fonts, colors) — prevent web UI overrides
+    mpv::qt::set_property(mpv, "sub-ass-override", "no");
+    mpv::qt::set_property(mpv, "secondary-sub-ass-override", "no");
+
     // // Setup handling events from MPV
     mpv_set_wakeup_callback(mpv, wakeup, this);
 
@@ -217,8 +233,10 @@ void MpvObject::setProperty(const QString& name, const QVariant& value)
         return;
     }
     if (name == "no-sub-ass") {
-        // Deprecated property, use sub-ass-override instead
-        mpv::qt::set_property(mpv, "sub-ass-override", value.toBool() ? "force" : "no");
+        // Ignore this deprecated property entirely — our ASS subtitles need
+        // their styling preserved (fonts with Unicode support for accented chars).
+        // The web UI sends no-sub-ass=true which would force mpv's default font,
+        // breaking accented characters on systems without Arial.
         return;
     }
     if (name == "cache-default" || name == "cache-backbuffer") {
