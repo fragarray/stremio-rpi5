@@ -67,6 +67,12 @@ ApplicationWindow {
         
         readonly property bool isFullscreen: root.visibility === Window.FullScreen // just to send the initial state
 
+        // Dual subtitles state
+        property string dualSecondarySubUrl: ""
+        property int dualSecondaryTrackId: -1
+        property bool dualSubtitlesActive: false
+        property var dualSecondaryStyle: null
+
         signal event(var ev, var args)
         function onEvent(ev, args) {
             if (ev === "quit") quitApp()
@@ -79,6 +85,53 @@ ApplicationWindow {
                 }
             }
             if (ev === "mpv-observe-prop") mpv.observeProperty(args)
+
+            // Dual subtitles: enable
+            if (ev === "dual-sub-enable" && args) {
+                // args = { secondaryUrl: "http://...", style: { fontSize, color, outlineColor, outlineSize, bold } }
+                transport.dualSecondarySubUrl = args.secondaryUrl || "";
+                transport.dualSecondaryStyle = args.style || null;
+                transport.dualSubtitlesActive = true;
+                mpv.command(["sub-add", args.secondaryUrl, "auto", "Secondary"]);
+                // Style will be applied when track-list updates and secondary-sid is set
+                if (args.style) {
+                    mpv.setProperty("sub-font-size", args.style.fontSize || 40);
+                    mpv.setProperty("sub-color", args.style.color || "#FFFF00");
+                    mpv.setProperty("sub-outline-color", args.style.outlineColor || "#000000");
+                    mpv.setProperty("sub-outline-size", args.style.outlineSize || 2);
+                    mpv.setProperty("sub-bold", args.style.bold ? "yes" : "no");
+                }
+                console.log("[DualSub] Enabled dual subtitles, loading secondary: " + args.secondaryUrl);
+            }
+
+            // Dual subtitles: disable
+            if (ev === "dual-sub-disable") {
+                mpv.setProperty("secondary-sid", "no");
+                if (transport.dualSecondaryTrackId > 0) {
+                    mpv.command(["sub-remove", transport.dualSecondaryTrackId.toString()]);
+                }
+                transport.dualSubtitlesActive = false;
+                transport.dualSecondarySubUrl = "";
+                transport.dualSecondaryTrackId = -1;
+                transport.dualSecondaryStyle = null;
+                console.log("[DualSub] Disabled dual subtitles");
+            }
+
+            // Dual subtitles: independent delay for secondary
+            if (ev === "secondary-sub-delay") {
+                mpv.setProperty("secondary-sub-delay", args);
+            }
+
+            // Dual subtitles: toggle secondary visibility
+            if (ev === "secondary-sub-toggle") {
+                mpv.setProperty("secondary-sub-visibility", args ? "yes" : "no");
+            }
+
+            // Dual subtitles: set secondary position
+            if (ev === "secondary-sub-pos") {
+                mpv.setProperty("secondary-sub-pos", args);
+            }
+
             if (ev === "control-event") wakeupEvent()
             if (ev === "wakeup") wakeupEvent()
             if (ev === "set-window-mode") onWindowMode(args)
@@ -299,7 +352,31 @@ ApplicationWindow {
     MpvObject {
         id: mpv
         anchors.fill: parent
-        onMpvEvent: function(ev, args) { transport.event(ev, args) }
+        onMpvEvent: function(ev, args) {
+            // Dual subtitles: detect new track added and set secondary-sid
+            if (ev === "mpv-prop-change" && args && args.name === "track-list" && transport.dualSubtitlesActive) {
+                var tracks = args.data;
+                if (Array.isArray(tracks)) {
+                    for (var i = 0; i < tracks.length; i++) {
+                        var t = tracks[i];
+                        if (t.type === "sub" && t.external === true && t.title === "Secondary") {
+                            if (transport.dualSecondaryTrackId !== t.id) {
+                                transport.dualSecondaryTrackId = t.id;
+                                mpv.setProperty("secondary-sid", t.id);
+                                console.log("[DualSub] Set secondary-sid to track " + t.id);
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            transport.event(ev, args);
+        }
+
+        Component.onCompleted: {
+            // Observe track-list for dual subtitle detection
+            mpv.observeProperty("track-list");
+        }
     }
 
     //
