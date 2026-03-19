@@ -1,10 +1,12 @@
 name: Shell
 
 on:
-  push:
-  pull_request:
-  schedule:
-    - cron: '15 21 * * *'
+  workflow_dispatch:
+  # push and pull_request disabled — macOS build not needed for ARM64 RPi5
+  # push:
+  # pull_request:
+  # schedule:
+  #   - cron: '15 21 * * *'
 jobs:
   build:
     runs-on: ${{ matrix.os }}
