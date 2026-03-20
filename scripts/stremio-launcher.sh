@@ -38,6 +38,11 @@ if [ ! -x "${STREMIO_BIN}" ]; then
     exit 1
 fi
 
+# Raise file descriptor limit to prevent "Too many open files" crash
+# WebEngine (Chromium) + mpv + Node.js can exhaust the default 1024 limit
+# during long playback sessions (>1h)
+ulimit -n 65536 2>/dev/null || ulimit -n 8192 2>/dev/null || true
+
 # Create log directory
 mkdir -p "${LOG_DIR}"
 
