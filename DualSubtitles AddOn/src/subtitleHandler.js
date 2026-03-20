@@ -76,15 +76,6 @@ function createSubtitleHandler(addonBaseUrl) {
     const primaryMatch = findBestMatch(results, cfg.primaryLanguage);
     const secondaryMatch = findBestMatch(results, cfg.secondaryLanguage);
 
-    // Build mpv-compatible style for the secondary subtitle
-    const secondaryStyle = {
-      fontSize: parseInt(cfg.secondaryFontSize, 10),
-      color: getMpvColor(cfg.secondaryColor),
-      borderColor: getMpvColor(cfg.secondaryOutlineColor),
-      borderSize: parseInt(cfg.secondaryOutlineSize, 10),
-      bold: cfg.secondaryBold === 'checked' || cfg.secondaryBold === true,
-    };
-
     // Collect available languages for the panel
     const availableLangs = [...new Set(results.map(s => s.lang).filter(Boolean))];
 
