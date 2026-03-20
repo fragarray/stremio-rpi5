@@ -450,6 +450,21 @@ ApplicationWindow {
                         console.log("[DualSub]   dualActive=" + transport.dualSubtitlesActive + " secondaryTrackId=" + transport.dualSecondaryTrackId);
                     }
 
+                    // Extract embedded (non-external) subtitle tracks for language detection
+                    var embeddedList = [];
+                    for (var em = 0; em < subTracks.length; em++) {
+                        if (!subTracks[em].external && subTracks[em].lang !== "(no lang)") {
+                            embeddedList.push({
+                                id: subTracks[em].id,
+                                lang: subTracks[em].lang,
+                                title: subTracks[em].title,
+                                codec: subTracks[em].codec
+                            });
+                        }
+                    }
+                    dualPanel.embeddedTracks = embeddedList;
+                    dualPanel.updateAvailableLangs();
+
                     // Phase 1: If dual subtitles active, find DualSecondary track and assign secondary-sid + styles
                     if (transport.dualSubtitlesActive) {
                         for (var i = 0; i < tracks.length; i++) {
@@ -524,6 +539,10 @@ ApplicationWindow {
                             transport.dualVideoId = videoId;
                             dualPollTimer.failCount = 0;
                             dualPollTimer.stallCount = 0;
+                            // Store available OpenSubtitles languages and refresh button list
+                            dualPanel.opensubLangs = info.available || [];
+                            dualPanel.secondaryIsEmbedded = false;
+                            dualPanel.updateAvailableLangs();
                             if (info.secondaryUrl) {
                                 transport.dualSecondarySubUrl = info.secondaryUrl;
                                 transport.dualSecondaryStyle = info.style || null;
@@ -538,7 +557,14 @@ ApplicationWindow {
                                 mpv.command(["sub-add", styledUrl, "auto", "DualSecondary"]);
                                 console.log("[DualSub] Loading secondary (" + info.secondaryLang + "): " + styledUrl);
                             } else {
-                                console.log("[DualSub] No secondary found for: " + videoId + " — panel active for language selection (available: " + JSON.stringify(info.available || []) + ")");
+                                // No OpenSubtitles result — try embedded tracks as fallback
+                                var embSec = dualPanel.findEmbeddedTrack(dualPanel.secSecondaryLang);
+                                if (embSec) {
+                                    dualPanel.selectEmbeddedSecondary(embSec, dualPanel.secSecondaryLang);
+                                    console.log("[DualSub] Fallback to embedded secondary: track #" + embSec.id + " lang=" + embSec.lang);
+                                } else {
+                                    console.log("[DualSub] No secondary found for: " + videoId + " — panel active for language selection (available: " + JSON.stringify(dualPanel.availableLangs) + ")");
+                                }
                             }
                         } catch (e) {
                             console.log("[DualSub] Error parsing dual-fetch response: " + e);
@@ -556,11 +582,12 @@ ApplicationWindow {
         // Cleanup dual subtitle state
         function cleanupDualSub() {
             mpv.setProperty("secondary-sid", "no");
-            if (transport.dualSecondaryTrackId > 0) {
+            // Only sub-remove external tracks (not embedded ones)
+            if (transport.dualSecondaryTrackId > 0 && transport.dualSecondarySubUrl) {
                 mpv.command(["sub-remove", transport.dualSecondaryTrackId.toString()]);
             }
             // Cleanup primary if managed by mpv
-            if (transport.dualPrimaryManaged && transport.dualPrimaryTrackId > 0) {
+            if (transport.dualPrimaryManaged && transport.dualPrimaryTrackId > 0 && transport.dualPrimarySubUrl) {
                 mpv.command(["sub-remove", transport.dualPrimaryTrackId.toString()]);
             }
             transport.dualSubtitlesActive = false;
@@ -572,6 +599,10 @@ ApplicationWindow {
             transport.dualPrimaryTrackId = -1;
             transport.dualPrimarySubUrl = "";
             transport.dualPrimaryManaged = false;
+            dualPanel.secondaryIsEmbedded = false;
+            dualPanel.opensubLangs = [];
+            dualPanel.embeddedTracks = [];
+            dualPanel.availableLangs = [];
             console.log("[DualSub] Cleaned up dual subtitles");
         }
 
@@ -1062,6 +1093,13 @@ ApplicationWindow {
         property bool useMargins: dualSettings.useMargins
         property bool langSearching: false
 
+        // Available languages: only these are shown as buttons
+        property var opensubLangs: []         // from OpenSubtitles addon response
+        property var embeddedTracks: []       // [{id, lang, title, codec}] from track-list
+        property var availableLangs: []       // computed union of opensub + embedded + selected
+        // Whether the current secondary is an embedded track (no ASS proxy)
+        property bool secondaryIsEmbedded: false
+
         // Variant tracking: maps lang code -> array of {index, url, title}
         property var primaryVariants: ({})   // e.g. {"ita": [{index:0, url:"...", title:"..."},...]}
         property var secondaryVariants: ({})
@@ -1127,7 +1165,10 @@ ApplicationWindow {
         function scheduleReload() { dualReloadTimer.restart(); }
 
         function doReload() {
-            if (!transport.dualSubtitlesActive || !transport.dualSecondarySubUrl) return;
+            if (!transport.dualSubtitlesActive) return;
+            // Embedded tracks don't use the ASS proxy, nothing to reload
+            if (dualPanel.secondaryIsEmbedded) return;
+            if (!transport.dualSecondarySubUrl) return;
             // If primary is mpv-managed, reload both tracks
             if (transport.dualPrimaryManaged) { dualPanel.doReloadBoth(); return; }
             if (transport.dualSecondaryTrackId > 0) {
@@ -1148,7 +1189,12 @@ ApplicationWindow {
 
         // Search for subtitles with new secondary language
         function searchLanguages(newSecLang) {
-            if (!transport.dualSubtitlesActive || transport.dualContentType === "" || transport.dualVideoId === "") return;
+            if (!transport.dualSubtitlesActive || transport.dualContentType === "" || transport.dualVideoId === "") {
+                // No addon context — try embedded tracks directly
+                var embFallback = dualPanel.findEmbeddedTrack(newSecLang);
+                if (embFallback) dualPanel.selectEmbeddedSecondary(embFallback, newSecLang);
+                return;
+            }
             dualPanel.langSearching = true;
             var xhr = new XMLHttpRequest();
             var url = "http://127.0.0.1:7000/dual-search/" + encodeURIComponent(transport.dualContentType)
@@ -1176,6 +1222,7 @@ ApplicationWindow {
                             }
                             if (info.found && info.secondaryUrl) {
                                 dualPanel.secSecondaryLang = newSecLang;
+                                dualPanel.secondaryIsEmbedded = false;
                                 transport.dualSecondarySubUrl = info.secondaryUrl;
                                 // Reset variant index for this language
                                 var si = dualPanel.secondaryVariantIdx;
@@ -1184,7 +1231,13 @@ ApplicationWindow {
                                 console.log("[DualSub] Language changed, new secondary: " + info.secondaryLang + " " + info.secondaryUrl);
                                 dualPanel.doReload();
                             } else {
-                                console.log("[DualSub] Language not found: " + newSecLang + " (available: " + JSON.stringify(info.available) + ")");
+                                // Fallback to embedded tracks
+                                var embedded = dualPanel.findEmbeddedTrack(newSecLang);
+                                if (embedded) {
+                                    dualPanel.selectEmbeddedSecondary(embedded, newSecLang);
+                                } else {
+                                    console.log("[DualSub] Language not found: " + newSecLang + " (available: " + JSON.stringify(dualPanel.availableLangs) + ")");
+                                }
                             }
                         } catch(e) {
                             console.log("[DualSub] Language search parse error: " + e);
@@ -1197,7 +1250,13 @@ ApplicationWindow {
 
         // Search for subtitles with new primary language — switches primary to mpv-managed
         function searchPrimaryLanguage(newPriLang) {
-            if (!transport.dualSubtitlesActive || transport.dualContentType === "" || transport.dualVideoId === "") return;
+            if (!transport.dualSubtitlesActive) return;
+            // If no addon context, try embedded tracks directly
+            if (transport.dualContentType === "" || transport.dualVideoId === "") {
+                var embFallback = dualPanel.findEmbeddedTrack(newPriLang);
+                if (embFallback) dualPanel.selectEmbeddedPrimary(embFallback, newPriLang);
+                return;
+            }
             dualPanel.langSearching = true;
             var xhr = new XMLHttpRequest();
             var url = "http://127.0.0.1:7000/dual-search/" + encodeURIComponent(transport.dualContentType)
@@ -1239,7 +1298,13 @@ ApplicationWindow {
                                 console.log("[DualSub] Primary language changed to " + newPriLang + ", switching to mpv-managed primary");
                                 dualPanel.doReloadBoth();
                             } else {
-                                console.log("[DualSub] Primary language not found: " + newPriLang);
+                                // Fallback to embedded tracks
+                                var embedded = dualPanel.findEmbeddedTrack(newPriLang);
+                                if (embedded) {
+                                    dualPanel.selectEmbeddedPrimary(embedded, newPriLang);
+                                } else {
+                                    console.log("[DualSub] Primary language not found: " + newPriLang);
+                                }
                             }
                         } catch(e) {
                             console.log("[DualSub] Primary language search parse error: " + e);
@@ -1324,6 +1389,77 @@ ApplicationWindow {
             return variants[lang].length;
         }
 
+        // Map 2-letter ISO 639-1 codes to 3-letter OpenSubtitles codes
+        function mapLangCode(code) {
+            if (!code || code === "(no lang)") return "";
+            if (code.length >= 3) return code;
+            var map = {
+                "it": "ita", "en": "eng", "es": "spa", "fr": "fre", "de": "ger",
+                "pt": "por", "ja": "jpn", "ko": "kor", "zh": "chi", "ar": "ara",
+                "ru": "rus", "hi": "hin", "pl": "pol", "tr": "tur", "nl": "dut",
+                "sv": "swe", "no": "nor", "da": "dan", "fi": "fin", "cs": "cze",
+                "ro": "ron", "hu": "hun", "el": "ell", "he": "heb", "th": "tha",
+                "vi": "vie", "id": "ind", "ms": "may", "hr": "hrv", "sl": "slv",
+                "pb": "pob"
+            };
+            return map[code] || code;
+        }
+
+        // Rebuild the availableLangs list from opensub + embedded + selected
+        function updateAvailableLangs() {
+            var langs = [];
+            for (var i = 0; i < opensubLangs.length; i++) {
+                if (langs.indexOf(opensubLangs[i]) < 0) langs.push(opensubLangs[i]);
+            }
+            for (var j = 0; j < embeddedTracks.length; j++) {
+                var eLang = mapLangCode(embeddedTracks[j].lang);
+                if (eLang && langs.indexOf(eLang) < 0) langs.push(eLang);
+            }
+            // Always keep the currently selected languages visible
+            if (secPrimaryLang && langs.indexOf(secPrimaryLang) < 0) langs.push(secPrimaryLang);
+            if (secSecondaryLang && langs.indexOf(secSecondaryLang) < 0) langs.push(secSecondaryLang);
+            availableLangs = langs;
+        }
+
+        // Find an embedded track matching a language code
+        function findEmbeddedTrack(langCode) {
+            for (var i = 0; i < embeddedTracks.length; i++) {
+                if (mapLangCode(embeddedTracks[i].lang) === langCode) return embeddedTracks[i];
+            }
+            return null;
+        }
+
+        // Select an embedded track as secondary (no ASS proxy needed)
+        function selectEmbeddedSecondary(track, langCode) {
+            // Remove previously loaded external secondary track
+            if (transport.dualSecondaryTrackId > 0 && transport.dualSecondarySubUrl) {
+                mpv.setProperty("secondary-sid", "no");
+                mpv.command(["sub-remove", "" + transport.dualSecondaryTrackId]);
+            }
+            dualPanel.secSecondaryLang = langCode;
+            dualPanel.secondaryIsEmbedded = true;
+            transport.dualSecondarySubUrl = "";  // no URL for embedded
+            transport.dualSecondaryTrackId = track.id;
+            mpv.setProperty("secondary-sid", "" + track.id);
+            mpv.setProperty("secondary-sub-visibility", "yes");
+            console.log("[DualSub] Using embedded track #" + track.id + " (" + track.lang + ") as secondary");
+        }
+
+        // Select an embedded track as primary
+        function selectEmbeddedPrimary(track, langCode) {
+            // Remove previously loaded external primary track
+            if (transport.dualPrimaryManaged && transport.dualPrimaryTrackId > 0 && transport.dualPrimarySubUrl) {
+                mpv.command(["sub-remove", "" + transport.dualPrimaryTrackId]);
+            }
+            dualPanel.secPrimaryLang = langCode;
+            transport.dualPrimarySubUrl = "";
+            transport.dualPrimaryManaged = false;
+            transport.dualPrimaryTrackId = track.id;
+            mpv.setProperty("sid", "" + track.id);
+            mpv.setProperty("sub-visibility", "yes");
+            console.log("[DualSub] Using embedded track #" + track.id + " (" + track.lang + ") as primary");
+        }
+
         Flickable {
             id: dualPanelFlick
             anchors.fill: parent; anchors.margins: 16
@@ -1359,7 +1495,7 @@ ApplicationWindow {
             Rectangle { width: parent.width; height: 1; color: "#444466" }
 
             // --- Primary Language ---
-            Text { text: "Lingua primaria" + (dualPanel.langSearching ? " \u23F3" : ""); color: "#BBBBBB"; font.pixelSize: 13 }
+            Text { text: "Lingua primaria" + (dualPanel.langSearching ? " \u23F3" : "") + (dualPanel.availableLangs.length === 0 ? " (caricamento...)" : ""); color: "#BBBBBB"; font.pixelSize: 13 }
             Flickable {
                 width: parent.width; height: 34
                 contentWidth: priLangRow.width; clip: true
@@ -1367,19 +1503,20 @@ ApplicationWindow {
                 Row {
                     id: priLangRow; spacing: 4
                     Repeater {
-                        model: ["ita","eng","spa","fre","ger","por","jpn","kor","chi","ara","rus","hin","pol","tur","dut","swe","nor","dan","fin","cze","ron","hun","ell","heb","tha","vie","ind","may","pob","hrv","slv"]
+                        model: dualPanel.availableLangs
                         Rectangle {
                             id: priBtnRect
                             property int varCount: dualPanel.getVariantCount("primary", modelData)
                             property string lang: modelData
                             property bool isSelected: dualPanel.secPrimaryLang === modelData
+                            property bool isEmbeddedOnly: dualPanel.opensubLangs.indexOf(modelData) < 0 && dualPanel.findEmbeddedTrack(modelData) !== null
                             width: priLangContent.width + 14; height: 28; radius: 4
                             color: isSelected ? "#44AA44" : "#333355"
-                            border.color: isSelected ? "#88FF88" : "#444466"
+                            border.color: isSelected ? "#88FF88" : (isEmbeddedOnly ? "#665544" : "#444466")
                             Row {
                                 id: priLangContent
                                 anchors.centerIn: parent; spacing: 3
-                                Text { id: priLangText; text: priBtnRect.lang.toUpperCase(); color: priBtnRect.isSelected ? "#FFF" : "#AAA"; font.pixelSize: 12; font.bold: priBtnRect.isSelected; anchors.verticalCenter: parent.verticalCenter }
+                                Text { id: priLangText; text: priBtnRect.lang.toUpperCase() + (priBtnRect.isEmbeddedOnly ? " \uD83D\uDCCE" : ""); color: priBtnRect.isSelected ? "#FFF" : "#AAA"; font.pixelSize: 12; font.bold: priBtnRect.isSelected; anchors.verticalCenter: parent.verticalCenter }
                                 Row {
                                     visible: priBtnRect.isSelected && priBtnRect.varCount > 1
                                     spacing: 2; anchors.verticalCenter: parent.verticalCenter
@@ -1425,19 +1562,20 @@ ApplicationWindow {
                 Row {
                     id: secLangRow; spacing: 4
                     Repeater {
-                        model: ["ita","eng","spa","fre","ger","por","jpn","kor","chi","ara","rus","hin","pol","tur","dut","swe","nor","dan","fin","cze","ron","hun","ell","heb","tha","vie","ind","may","pob","hrv","slv"]
+                        model: dualPanel.availableLangs
                         Rectangle {
                             id: secBtnRect
                             property int varCount: dualPanel.getVariantCount("secondary", modelData)
                             property string lang: modelData
                             property bool isSelected: dualPanel.secSecondaryLang === modelData
+                            property bool isEmbeddedOnly: dualPanel.opensubLangs.indexOf(modelData) < 0 && dualPanel.findEmbeddedTrack(modelData) !== null
                             width: secLangContent.width + 14; height: 28; radius: 4
                             color: isSelected ? "#4444AA" : "#333355"
-                            border.color: isSelected ? "#8888FF" : "#444466"
+                            border.color: isSelected ? "#8888FF" : (isEmbeddedOnly ? "#665544" : "#444466")
                             Row {
                                 id: secLangContent
                                 anchors.centerIn: parent; spacing: 3
-                                Text { id: langText2; text: secBtnRect.lang.toUpperCase(); color: secBtnRect.isSelected ? "#FFF" : "#AAA"; font.pixelSize: 12; font.bold: secBtnRect.isSelected; anchors.verticalCenter: parent.verticalCenter }
+                                Text { id: langText2; text: secBtnRect.lang.toUpperCase() + (secBtnRect.isEmbeddedOnly ? " \uD83D\uDCCE" : ""); color: secBtnRect.isSelected ? "#FFF" : "#AAA"; font.pixelSize: 12; font.bold: secBtnRect.isSelected; anchors.verticalCenter: parent.verticalCenter }
                                 Row {
                                     visible: secBtnRect.isSelected && secBtnRect.varCount > 1
                                     spacing: 2; anchors.verticalCenter: parent.verticalCenter
