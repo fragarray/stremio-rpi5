@@ -503,6 +503,8 @@ ApplicationWindow {
                             if (tracks[k].type === "sub" && tracks[k].title === "DualSecondary") secondaryExists = true;
                             if (tracks[k].type === "sub" && tracks[k].title === "DualPrimary") primaryExists = true;
                         }
+                        // Embedded secondary uses an existing track, not an external "DualSecondary"
+                        if (dualPanel.secondaryIsEmbedded && transport.dualSecondaryTrackId > 0) secondaryExists = true;
                         if (!secondaryExists) {
                             console.log("[DualSub] Phase3: Cleanup (secondaryExists=false, video likely changed)");
                             mpv.cleanupDualSub();
