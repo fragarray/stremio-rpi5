@@ -119,6 +119,14 @@ app.get('/dual-primary/:videoKey', async (req, res) => {
   const info = getDualInfo(videoKey);
   if (!info || !info.primaryUrl) {
     console.log(`[DualSub] No primary cached for: ${videoKey}, serving empty subtitle`);
+    // Record activation so QML can detect it and fall back to embedded tracks
+    lastDualActivation = {
+      videoKey,
+      timestamp: Date.now(),
+      secondaryUrl: info ? info.secondaryUrl : null,
+      secondaryLang: info ? info.secondaryLang : null,
+      style: info ? info.style : null,
+    };
     // Serve empty subtitle so the track loads without error — user can pick languages from panel
     res.setHeader('Content-Type', 'application/x-subrip; charset=utf-8');
     return res.send('1\n00:00:00,000 --> 00:00:01,000\n \n');

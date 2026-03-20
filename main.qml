@@ -557,13 +557,42 @@ ApplicationWindow {
                                 mpv.command(["sub-add", styledUrl, "auto", "DualSecondary"]);
                                 console.log("[DualSub] Loading secondary (" + info.secondaryLang + "): " + styledUrl);
                             } else {
-                                // No OpenSubtitles result — try embedded tracks as fallback
+                                // No OpenSubtitles secondary — try embedded tracks as fallback
                                 var embSec = dualPanel.findEmbeddedTrack(dualPanel.secSecondaryLang);
+                                // If configured secondary lang not in embedded, try first available embedded track
+                                if (!embSec && dualPanel.embeddedTracks.length > 0) {
+                                    embSec = dualPanel.embeddedTracks[0];
+                                    console.log("[DualSub] Configured secondary lang '" + dualPanel.secSecondaryLang + "' not in embedded, using first: #" + embSec.id + " lang=" + embSec.lang);
+                                }
                                 if (embSec) {
-                                    dualPanel.selectEmbeddedSecondary(embSec, dualPanel.secSecondaryLang);
+                                    var embSecLang = dualPanel.mapLangCode(embSec.lang) || embSec.lang;
+                                    dualPanel.selectEmbeddedSecondary(embSec, embSecLang);
                                     console.log("[DualSub] Fallback to embedded secondary: track #" + embSec.id + " lang=" + embSec.lang);
-                                } else {
-                                    console.log("[DualSub] No secondary found for: " + videoId + " — panel active for language selection (available: " + JSON.stringify(dualPanel.availableLangs) + ")");
+                                }
+
+                                // Also handle primary: if no OpenSubtitles at all, use embedded for primary too
+                                if (info.available && info.available.length === 0 && dualPanel.embeddedTracks.length > 0) {
+                                    var embPri = dualPanel.findEmbeddedTrack(dualPanel.secPrimaryLang);
+                                    if (!embPri) {
+                                        // Use a different embedded track than secondary if possible
+                                        for (var et = 0; et < dualPanel.embeddedTracks.length; et++) {
+                                            if (!embSec || dualPanel.embeddedTracks[et].id !== embSec.id) {
+                                                embPri = dualPanel.embeddedTracks[et];
+                                                break;
+                                            }
+                                        }
+                                        // If only one track, use same for both (better than empty)
+                                        if (!embPri && dualPanel.embeddedTracks.length > 0) embPri = dualPanel.embeddedTracks[0];
+                                    }
+                                    if (embPri) {
+                                        var embPriLang = dualPanel.mapLangCode(embPri.lang) || embPri.lang;
+                                        dualPanel.selectEmbeddedPrimary(embPri, embPriLang);
+                                        console.log("[DualSub] Fallback to embedded primary: track #" + embPri.id + " lang=" + embPri.lang);
+                                    }
+                                }
+
+                                if (!embSec) {
+                                    console.log("[DualSub] No embedded tracks found for: " + videoId + " — panel active for language selection");
                                 }
                             }
                         } catch (e) {

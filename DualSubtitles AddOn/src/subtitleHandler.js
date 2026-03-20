@@ -38,17 +38,43 @@ function createSubtitleHandler(addonBaseUrl) {
     // Query the community OpenSubtitles addon — uses standard Stremio addon protocol
     const results = await searchSubtitles({ type, id });
 
+    const subtitles = [];
+    const videoKey = id.replace(/[^a-zA-Z0-9_:-]/g, '');
+
+    // Build mpv-compatible style for the secondary subtitle
+    const secondaryStyle = {
+      fontSize: parseInt(cfg.secondaryFontSize, 10),
+      color: getMpvColor(cfg.secondaryColor),
+      borderColor: getMpvColor(cfg.secondaryOutlineColor),
+      borderSize: parseInt(cfg.secondaryOutlineSize, 10),
+      bold: cfg.secondaryBold === 'checked' || cfg.secondaryBold === true,
+    };
+
     if (!results || results.length === 0) {
-      console.log(`[DualSub] No subtitles found for ${id}`);
-      return { subtitles: [] };
+      console.log(`[DualSub] No OpenSubtitles found for ${id} — returning DUAL entry for embedded fallback`);
+
+      // Cache with empty data so QML can detect "no external subs" and fall back to embedded
+      dualInfoCache.set(videoKey, {
+        primaryUrl: null,
+        secondaryUrl: null,
+        secondaryLang: cfg.secondaryLanguage,
+        style: secondaryStyle,
+        available: [],
+      });
+
+      // Still return the DUAL entry so it appears in Stremio's subtitle picker
+      subtitles.push({
+        id: `dual-${cfg.primaryLanguage}-${cfg.secondaryLanguage}-${videoKey}`,
+        url: `${addonBaseUrl}/dual-primary/${encodeURIComponent(videoKey)}`,
+        lang: 'DUAL SUBTITLES',
+      });
+
+      return { subtitles, cacheMaxAge: 0 };
     }
 
     // Find best match for each language
     const primaryMatch = findBestMatch(results, cfg.primaryLanguage);
     const secondaryMatch = findBestMatch(results, cfg.secondaryLanguage);
-
-    const subtitles = [];
-    const videoKey = id.replace(/[^a-zA-Z0-9_:-]/g, '');
 
     // Build mpv-compatible style for the secondary subtitle
     const secondaryStyle = {
