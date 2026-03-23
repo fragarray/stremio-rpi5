@@ -467,21 +467,6 @@ If Arial is not installed (common on headless/minimal systems), mpv's default fo
 
 ---
 
-## CI/CD
-
-The GitHub Actions workflow (`.github/workflows/build-and-release.yml`) handles:
-
-- **On push to main/master**: builds the `.deb` and uploads it as an artifact
-- **On tag push (`v*`)**: builds the `.deb` and creates a GitHub Release with the `.deb` file directly downloadable
-
-### Creating a new release
-```bash
-git tag v4.4.181
-git push origin v4.4.181
-```
-
----
-
 ## Credits
 
 - [Stremio](https://www.stremio.com) — the original media center by Smart Code Ltd
