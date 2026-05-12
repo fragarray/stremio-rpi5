@@ -109,10 +109,18 @@ if ! apt-cache show qtwebengine5-dev >/dev/null 2>&1; then
     warn "qtwebengine5-dev non trovato in Raspbian. Raspbian non include Qt WebEngine."
     warn "Aggiungo il repository Debian Bookworm ufficiale (solo per i pacchetti mancanti)..."
 
-    # Chiave GPG di Debian
-    sudo apt-get install -y debian-archive-keyring
-    sudo install -m 0644 /usr/share/keyrings/debian-archive-keyring.gpg \
-        /etc/apt/keyrings/debian-archive-keyring.gpg 2>/dev/null || true
+    # Chiave GPG di Debian — su Raspbian il pacchetto debian-archive-keyring
+    # non esiste, scarichiamo le chiavi direttamente dal keyserver Ubuntu.
+    info "Scarico le chiavi GPG di Debian..."
+    rm -f /tmp/debian-keys.gpg
+    for KEY in 6ED0E7B82643E131 78DBA3BC47EF2265 F8D2585B8783D481; do
+        wget -qO- "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x${KEY}" \
+            | gpg --dearmor >> /tmp/debian-keys.gpg \
+            || error "Impossibile scaricare la chiave GPG ${KEY}. Controlla la connessione."
+    done
+    sudo install -m 0644 /tmp/debian-keys.gpg \
+        /etc/apt/keyrings/debian-archive-keyring.gpg
+    rm -f /tmp/debian-keys.gpg
 
     # Repository Debian Bookworm
     echo "deb [signed-by=/etc/apt/keyrings/debian-archive-keyring.gpg] \
