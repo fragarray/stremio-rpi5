@@ -43,9 +43,60 @@ if [ "$(id -u)" -eq 0 ]; then
     error "Non eseguire questo script come root. Usa un utente normale; sudo verrà chiesto dove necessario."
 fi
 
+# ---- Rileva versione Debian/Raspbian ----
+DISTRO_CODENAME="$(. /etc/os-release && echo "${VERSION_CODENAME:-unknown}")"
+info "Distribuzione rilevata: ${DISTRO_CODENAME}"
+
+# ---- Blocco su Trixie (Debian 13): Qt WebEngine non disponibile per armhf ----
+#
+# Debian Trixie (13) ha rimosso Qt5 WebEngine dai repository perché conteneva
+# una versione vecchia di Chromium. Qt6 WebEngine non è pacchettizzato per
+# armhf (32-bit) perché la compilazione di Chromium richiede un toolchain
+# a 64-bit per generare gli snapshot V8.
+#
+# In pratica: su armhf + Trixie NON esiste alcun Qt WebEngine installabile
+# tramite apt, e Stremio non può essere compilato senza di esso.
+#
+if [ "${DISTRO_CODENAME}" = "trixie" ] || [ "${DISTRO_CODENAME}" = "forky" ]; then
+    echo ""
+    echo -e "${RED}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${RED}║  ERRORE: distribuzione non compatibile con il build 32-bit  ║${NC}"
+    echo -e "${RED}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${YELLOW}Stai usando Raspberry Pi OS basato su Debian ${DISTRO_CODENAME} (13).${NC}"
+    echo ""
+    echo "Il problema: Stremio usa Qt WebEngine (un browser Chromium integrato)"
+    echo "che NON è disponibile come pacchetto per armhf (32-bit) su Trixie:"
+    echo ""
+    echo "  • Qt5 WebEngine  → rimosso da Debian 13 (Chromium obsoleto)"
+    echo "  • Qt6 WebEngine  → non pacchettizzato per armhf (richiede 64-bit build tools)"
+    echo ""
+    echo -e "${GREEN}Soluzioni:${NC}"
+    echo ""
+    echo "  1. [RACCOMANDATA] Usa Raspberry Pi OS BOOKWORM 32-bit (Debian 12):"
+    echo "     https://www.raspberrypi.com/software/operating-systems/"
+    echo "     → Seleziona 'Raspberry Pi OS (Legacy, 32-bit)' — basato su Bookworm"
+    echo "     → Qt5 WebEngine è disponibile e funzionante"
+    echo ""
+    echo "  2. Usa Raspberry Pi OS a 64-bit (Bookworm o Trixie):"
+    echo "     → Supportato nativamente da questo progetto (RPi5 build)"
+    echo "     → Qt WebEngine è disponibile per arm64"
+    echo ""
+    exit 1
+fi
+
 # ---- Step 1: Dipendenze di build ----
 info "[1/5] Installazione dipendenze di build..."
 sudo apt-get update
+
+# Su Bookworm il pacchetto si chiama libqt5dbus5; su distro future potrebbe
+# cambiare nome (t64 transition). Proviamo prima il nome canonico, poi il t64.
+QT_DBUS_PKG="libqt5dbus5"
+if ! apt-cache show "${QT_DBUS_PKG}" >/dev/null 2>&1; then
+    QT_DBUS_PKG="libqt5dbus5t64"
+    warn "libqt5dbus5 non trovato, uso ${QT_DBUS_PKG}"
+fi
+
 sudo apt-get install -y \
     build-essential \
     cmake \
@@ -59,7 +110,7 @@ sudo apt-get install -y \
     qtdeclarative5-dev \
     qtwebengine5-dev \
     libqt5webchannel5-dev \
-    libqt5dbus5 \
+    "${QT_DBUS_PKG}" \
     libqt5opengl5-dev \
     qml-module-qtwebchannel \
     qml-module-qtwebengine \
