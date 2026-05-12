@@ -97,6 +97,44 @@ if ! apt-cache show "${QT_DBUS_PKG}" >/dev/null 2>&1; then
     warn "libqt5dbus5 non trovato, uso ${QT_DBUS_PKG}"
 fi
 
+# ---- Raspbian non include Qt WebEngine: aggiungi Debian Bookworm come sorgente ----
+#
+# Raspbian (il fork armhf della Raspberry Pi Foundation) non compila Qt WebEngine
+# nei propri repository, nemmeno su Bookworm. Il pacchetto esiste però nel repo
+# Debian Bookworm ufficiale, che è ABI-compatibile con Raspbian.
+# Aggiungiamo quel repo con priorità bassa (100) e alziamo la priorità solo per
+# i pacchetti Qt WebEngine, evitando di sovrascrivere il resto del sistema.
+#
+if ! apt-cache show qtwebengine5-dev >/dev/null 2>&1; then
+    warn "qtwebengine5-dev non trovato in Raspbian. Raspbian non include Qt WebEngine."
+    warn "Aggiungo il repository Debian Bookworm ufficiale (solo per i pacchetti mancanti)..."
+
+    # Chiave GPG di Debian
+    sudo apt-get install -y debian-archive-keyring
+    sudo install -m 0644 /usr/share/keyrings/debian-archive-keyring.gpg \
+        /etc/apt/keyrings/debian-archive-keyring.gpg 2>/dev/null || true
+
+    # Repository Debian Bookworm
+    echo "deb [signed-by=/etc/apt/keyrings/debian-archive-keyring.gpg] \
+http://deb.debian.org/debian bookworm main" \
+        | sudo tee /etc/apt/sources.list.d/debian-bookworm-qtwebengine.list
+
+    # Pinning: priorità 100 per tutto Debian (sotto Raspbian), ma 600 per Qt WebEngine
+    sudo tee /etc/apt/preferences.d/debian-bookworm-qtwebengine > /dev/null << 'PINEOF'
+# Repo Debian Bookworm aggiunto solo per Qt WebEngine (non disponibile in Raspbian armhf)
+Package: *
+Pin: origin deb.debian.org
+Pin-Priority: 100
+
+Package: qtwebengine5-dev libqt5webengine5 libqt5webenginecore5 libqt5webenginewidgets5 libqt5webengine-data qml-module-qtwebengine
+Pin: origin deb.debian.org
+Pin-Priority: 600
+PINEOF
+
+    sudo apt-get update
+    info "Repository Debian Bookworm aggiunto con pinning selettivo."
+fi
+
 sudo apt-get install -y \
     build-essential \
     cmake \
