@@ -87,6 +87,12 @@ fi
 
 # ---- Step 1: Dipendenze di build ----
 info "[1/5] Installazione dipendenze di build..."
+
+# Rimuovi eventuale sorgente Debian rimasta da un run precedente fallito,
+# così il primo apt-get update parte sempre da uno stato pulito.
+sudo rm -f /etc/apt/sources.list.d/debian-bookworm-qtwebengine.list
+sudo rm -f /etc/apt/keyrings/debian-archive-keyring.gpg
+
 sudo apt-get update
 
 # Su Bookworm il pacchetto si chiama libqt5dbus5; su distro future potrebbe
