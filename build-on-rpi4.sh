@@ -88,10 +88,17 @@ fi
 # ---- Step 1: Dipendenze di build ----
 info "[1/5] Installazione dipendenze di build..."
 
-# Rimuovi eventuale sorgente Debian rimasta da un run precedente fallito,
-# così il primo apt-get update parte sempre da uno stato pulito.
-sudo rm -f /etc/apt/sources.list.d/debian-bookworm-qtwebengine.list
+# Cleanup aggressivo: rimuove TUTTE le entry deb.debian.org da qualsiasi file apt
+# (gestisce run precedenti falliti indipendentemente da dove il file era finito).
+info "Pulizia sorgenti Debian eventualmente rimaste da run precedenti..."
+sudo find /etc/apt/sources.list.d/ -name "*.list" 2>/dev/null \
+    | xargs -r grep -l "deb\.debian\.org" \
+    | xargs -r sudo rm -f
+if sudo grep -q "deb\.debian\.org" /etc/apt/sources.list 2>/dev/null; then
+    sudo sed -i '/deb\.debian\.org/d' /etc/apt/sources.list
+fi
 sudo rm -f /etc/apt/keyrings/debian-archive-keyring.gpg
+sudo rm -f /etc/apt/preferences.d/debian-bookworm-qtwebengine
 
 sudo apt-get update
 
@@ -115,18 +122,13 @@ if ! apt-cache show qtwebengine5-dev >/dev/null 2>&1; then
     warn "qtwebengine5-dev non trovato in Raspbian. Raspbian non include Qt WebEngine."
     warn "Aggiungo il repository Debian Bookworm ufficiale (solo per i pacchetti mancanti)..."
 
-    # Chiave GPG di Debian — su Raspbian il pacchetto debian-archive-keyring
-    # non esiste, scarichiamo le chiavi direttamente dal keyserver Ubuntu.
-    info "Scarico le chiavi GPG di Debian..."
-    rm -f /tmp/debian-keys.gpg
-    for KEY in 6ED0E7B82643E131 78DBA3BC47EF2265 F8D2585B8783D481; do
-        wget -qO- "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x${KEY}" \
-            | gpg --dearmor >> /tmp/debian-keys.gpg \
-            || error "Impossibile scaricare la chiave GPG ${KEY}. Controlla la connessione."
-    done
-    sudo install -m 0644 /tmp/debian-keys.gpg \
-        /etc/apt/keyrings/debian-archive-keyring.gpg
-    rm -f /tmp/debian-keys.gpg
+    # Chiave GPG ufficiale Debian Bookworm — scaricata direttamente da ftp-master.debian.org
+    # (più affidabile dei keyserver, che su Raspbian non funzionano correttamente)
+    info "Scarico la chiave GPG di Debian Bookworm..."
+    wget -qO- "https://ftp-master.debian.org/keys/archive-key-12.asc" \
+        | gpg --dearmor \
+        | sudo tee /etc/apt/keyrings/debian-archive-keyring.gpg > /dev/null \
+        || error "Impossibile scaricare la chiave GPG di Debian. Controlla la connessione."
 
     # Repository Debian Bookworm
     echo "deb [signed-by=/etc/apt/keyrings/debian-archive-keyring.gpg] \
