@@ -1,4 +1,4 @@
-name: Build & Release (ARM64 + ARM32)
+name: Build & Release ARM64 DEB
 
 on:
   workflow_dispatch:
@@ -8,58 +8,28 @@ on:
       - master
 
 jobs:
-
-  # ── 1. Compute the next version number (shared between both builds) ───────
-  version:
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.v.outputs.version }}
-      tag:     ${{ steps.v.outputs.tag }}
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0   # full history needed to find the latest tag
-
-      - id: v
-        run: |
-          BASE=$(sed -E '/^project\(/!d;s/^.*VERSION "([^"]+)".*$/\1/g' CMakeLists.txt)
-          MAJOR=$(echo "$BASE" | cut -d. -f1)
-          MINOR=$(echo "$BASE" | cut -d. -f2)
-          LATEST_TAG=$(git tag -l "v${MAJOR}.${MINOR}.*" --sort=-v:refname | head -n1)
-          if [ -n "$LATEST_TAG" ]; then
-            LAST_PATCH=$(echo "$LATEST_TAG" | sed "s/v${MAJOR}\.${MINOR}\.\(.*\)/\1/")
-            NEXT_PATCH=$((LAST_PATCH + 1))
-          else
-            NEXT_PATCH=$(echo "$BASE" | cut -d. -f3)
-          fi
-          VERSION="${MAJOR}.${MINOR}.${NEXT_PATCH}"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Next release: v${VERSION}"
-
-  # ── 2a. ARM64 build — native on GitHub's ARM64 runner ────────────────────
-  build-arm64:
-    needs: version
+  build-and-release:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
     permissions:
-      contents: read
+      contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           submodules: recursive
-          fetch-depth: 0
+          fetch-depth: 0   # full history needed to find latest tag
 
       - name: Initialize submodules (fallback)
         run: |
           if [ ! -f deps/singleapplication/CMakeLists.txt ]; then
+            echo "SingleApplication submodule missing, cloning manually..."
             rm -rf deps/singleapplication
             git clone https://github.com/itay-grudev/SingleApplication deps/singleapplication
           fi
           if [ ! -f deps/libmpv/include/mpv/client.h ]; then
+            echo "libmpv headers missing, cloning manually..."
             rm -rf deps/libmpv
             git clone https://github.com/Ivshti/libmpv deps/libmpv
           fi
@@ -69,162 +39,86 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential cmake pkgconf librsvg2-bin wget \
-            libssl-dev libmpv-dev \
+            libssl-dev \
             qtbase5-dev qtdeclarative5-dev qtwebengine5-dev \
             libqt5webchannel5-dev libqt5dbus5 libqt5opengl5-dev \
             qml-module-qtwebchannel qml-module-qtwebengine \
             qml-module-qt-labs-platform qml-module-qtquick-dialogs \
             qml-module-qtquick-controls qml-module-qt-labs-settings \
             qml-module-qt-labs-folderlistmodel \
-            nodejs npm
+            libmpv-dev nodejs npm
 
       - name: Install addon dependencies
         run: cd "DualSubtitles AddOn" && npm install --production
 
-      - name: Build arm64 .deb
+      - name: Compute next version
+        id: version
+        run: |
+          # Base version from CMakeLists.txt (e.g. 4.4.181)
+          BASE=$(sed -E '/^project\(/!d;s/^.*VERSION "([^"]+)".*$/\1/g' CMakeLists.txt)
+          MAJOR=$(echo "$BASE" | cut -d. -f1)
+          MINOR=$(echo "$BASE" | cut -d. -f2)
+
+          # Find the latest tag matching vMAJOR.MINOR.* and increment patch
+          LATEST_TAG=$(git tag -l "v${MAJOR}.${MINOR}.*" --sort=-v:refname | head -n1)
+          if [ -n "$LATEST_TAG" ]; then
+            LAST_PATCH=$(echo "$LATEST_TAG" | sed "s/v${MAJOR}\.${MINOR}\.\(.*\)/\1/")
+            NEXT_PATCH=$((LAST_PATCH + 1))
+          else
+            NEXT_PATCH=$(echo "$BASE" | cut -d. -f3)
+          fi
+
+          VERSION="${MAJOR}.${MINOR}.${NEXT_PATCH}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Next release: v${VERSION}"
+
+      - name: Build and package .deb
         run: |
           chmod +x scripts/build-deb.sh scripts/stremio-launcher.sh
           bash scripts/build-deb.sh --compile
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: deb-arm64
-          path: "*.deb"
-          retention-days: 7
-
-  # ── 2b. ARM32 (armhf) build — QEMU emulation on x86 runner ──────────────
-  #
-  #  The uraimo/run-on-arch-action pulls an arm32v7/debian:bookworm Docker
-  #  image, emulates it with QEMU, and runs the build fully inside it.
-  #  dpkg --print-architecture inside the container returns "armhf", so
-  #  build-deb.sh auto-detects the correct target without any env override.
-  #
-  build-armhf:
-    needs: version
-    runs-on: ubuntu-24.04
-    timeout-minutes: 180   # QEMU builds are ~2× slower than native
-    permissions:
-      contents: read
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          fetch-depth: 0
-
-      - name: Initialize submodules (fallback)
-        run: |
-          if [ ! -f deps/singleapplication/CMakeLists.txt ]; then
-            rm -rf deps/singleapplication
-            git clone https://github.com/itay-grudev/SingleApplication deps/singleapplication
-          fi
-          if [ ! -f deps/libmpv/include/mpv/client.h ]; then
-            rm -rf deps/libmpv
-            git clone https://github.com/Ivshti/libmpv deps/libmpv
-          fi
-
-      - name: Build armhf .deb inside QEMU (arm32v7/debian:bookworm)
-        uses: uraimo/run-on-arch-action@v2
-        with:
-          arch: armv7
-          distro: bookworm
-          githubToken: ${{ github.token }}
-          # Install build deps once and cache the Docker layer
-          install: |
-            apt-get update
-            apt-get install -y \
-              build-essential cmake pkgconf librsvg2-bin wget \
-              libssl-dev libmpv-dev \
-              qtbase5-dev qtdeclarative5-dev qtwebengine5-dev \
-              libqt5webchannel5-dev libqt5dbus5 libqt5opengl5-dev \
-              qml-module-qtwebchannel qml-module-qtwebengine \
-              qml-module-qt-labs-platform qml-module-qtquick-dialogs \
-              qml-module-qtquick-controls qml-module-qt-labs-settings \
-              qml-module-qt-labs-folderlistmodel \
-              nodejs npm
-          run: |
-            cd "DualSubtitles AddOn" && npm install --production && cd ..
-            chmod +x scripts/build-deb.sh scripts/stremio-launcher.sh
-            bash scripts/build-deb.sh --compile
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: deb-armhf
-          path: "*.deb"
-          retention-days: 7
-
-  # ── 3. Create tag + GitHub Release with both .deb files ──────────────────
-  release:
-    needs: [version, build-arm64, build-armhf]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Download arm64 .deb
-        uses: actions/download-artifact@v4
-        with:
-          name: deb-arm64
-          path: release/
-
-      - name: Download armhf .deb
-        uses: actions/download-artifact@v4
-        with:
-          name: deb-armhf
-          path: release/
-
-      - name: Create and push tag
+      - name: Create tag
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "${{ needs.version.outputs.tag }}"
-          git push origin "${{ needs.version.outputs.tag }}"
+          git tag "${{ steps.version.outputs.tag }}"
+          git push origin "${{ steps.version.outputs.tag }}"
 
-      - name: Upload combined artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: stremio-${{ needs.version.outputs.version }}-all-debs
-          path: release/*.deb
+          name: stremio-${{ steps.version.outputs.version }}-arm64-deb
+          path: "*.deb"
           retention-days: 90
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.version.outputs.tag }}
-          name: Stremio v${{ needs.version.outputs.version }} for Raspberry Pi
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Stremio v${{ steps.version.outputs.version }} for Raspberry Pi 5
           body: |
-            ## Stremio v${{ needs.version.outputs.version }}
+            ## Stremio v${{ steps.version.outputs.version }} — ARM64 (Raspberry Pi 5)
 
-            Two builds are included: **ARM64** for Raspberry Pi 5 (64-bit OS) and **ARM32/armhf** for Raspberry Pi 4 (Raspberry Pi OS 32-bit).
-
-            ### Installation — Raspberry Pi 5 (ARM64)
+            ### Installation
             ```bash
-            sudo apt install ./stremio_${{ needs.version.outputs.version }}_arm64.deb
-            ```
-
-            ### Installation — Raspberry Pi 4 (ARM32 / Raspberry Pi OS 32-bit)
-            ```bash
-            sudo apt install ./stremio_${{ needs.version.outputs.version }}_armhf.deb
+            sudo apt install ./stremio_${{ steps.version.outputs.version }}_arm64.deb
             ```
 
             ### What's included
-            - Stremio shell (Qt5/WebEngine UI) compiled natively for each architecture
+            - Stremio shell (Qt5/WebEngine UI) compiled natively for ARM64
             - Node.js streaming server (server.js)
             - DualSubtitles addon (dual subtitle support with independent styling)
             - Launcher script with automatic server management
             - Desktop integration (icons, MIME types, .desktop file)
 
             ### Requirements
-            - **arm64**: Raspberry Pi 5 (8 GB recommended) or any ARM64 SBC — Debian Bookworm+ / Ubuntu 24.04+ (arm64)
-            - **armhf**: Raspberry Pi 4 (4 GB recommended) — Raspberry Pi OS 32-bit (Bookworm) or Debian Bookworm (armhf)
-            - Runtime dependencies are resolved automatically by apt
+            - Raspberry Pi 5 (8GB recommended) or any ARM64 board
+            - Ubuntu 24.04+ / Debian Bookworm+ (arm64)
+            - All runtime dependencies are installed automatically via apt
 
             ### Hardware decoding
-            Both builds enable V4L2 M2M hardware decoding by default for smooth video playback.
-          files: "release/*.deb"
+            This build enables V4L2 M2M hardware decoding by default for smooth video playback.
+          files: "*.deb"
           draft: false
           prerelease: false

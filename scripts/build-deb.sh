@@ -24,13 +24,11 @@ BUILD_DIR="${SOURCE_DIR}/build"
 
 # Extract version from CMakeLists.txt
 VERSION=$(sed -E '/^project\(/!d;s/^.*VERSION "([^"]+)".*$/\1/g' "${SOURCE_DIR}/CMakeLists.txt")
+ARCH="arm64"
 PKG_NAME="stremio"
 PKG_DIR="${SOURCE_DIR}/deb-build/${PKG_NAME}_${VERSION}_${ARCH}"
 
 SERVER_URL=$(cat "${SOURCE_DIR}/server-url.txt" | tr -d '[:space:]')
-
-# Allow ARCH to be set by the caller (e.g. from CI); otherwise auto-detect.
-ARCH="${ARCH:-$(dpkg --print-architecture)}"
 
 COMPILE=false
 if [ "${1:-}" = "--compile" ]; then
@@ -190,14 +188,14 @@ Architecture: ${ARCH}
 Depends: nodejs (>= 12.0.0), libmpv2 (>= 0.30.0), libqt5webengine5 (>= 5.15.0), libqt5webenginecore5 (>= 5.15.0), libqt5webchannel5 (>= 5.15.0), libqt5widgets5t64 (>= 5.15.0) | libqt5widgets5 (>= 5.15.0), libqt5gui5t64 (>= 5.15.0) | libqt5gui5 (>= 5.15.0), libqt5qml5 (>= 5.15.0), libqt5quick5 (>= 5.15.0), libqt5network5t64 (>= 5.15.0) | libqt5network5 (>= 5.15.0), libqt5dbus5t64 (>= 5.15.0) | libqt5dbus5 (>= 5.15.0), libqt5opengl5t64 (>= 5.15.0) | libqt5opengl5 (>= 5.15.0), libqt5core5t64 (>= 5.15.0) | libqt5core5a (>= 5.15.0), qml-module-qtwebengine (>= 5.15.0), qml-module-qtwebchannel (>= 5.15.0), qml-module-qtquick-controls (>= 5.15.0), qml-module-qtquick-dialogs (>= 5.15.0), qml-module-qt-labs-platform (>= 5.15.0), qml-module-qt-labs-settings (>= 5.15.0), qml-module-qt-labs-folderlistmodel (>= 5.15.0), libssl3t64 (>= 3.0.0) | libssl3 (>= 3.0.0) | libssl1.1 (>= 1.1.0), librubberband2 (>= 1.8.0), libuchardet0 (>= 0.0.6), libqt5webengine-data
 Recommends: libfdk-aac2, xdg-utils
 Installed-Size: ${INSTALLED_SIZE}
-Maintainer: Stremio Community <stremio@community.arm>
+Maintainer: Stremio Community <stremio@community.arm64>
 Homepage: https://www.stremio.com
 Description: Stremio - Freedom to Stream
  Stremio is a modern media center that gives you the freedom to stream your
  favorite content. It aggregates video content from multiple sources including
  movies, TV shows, series, and live TV channels.
  .
- This package is compiled natively for ${ARCH} (Raspberry Pi and compatible ARM boards).
+ This package is built for Raspberry Pi 5 (arm64/aarch64) running Ubuntu.
  It includes the Stremio shell (Qt5/WebEngine UI), the Node.js streaming
  server backend, and the DualSubtitles addon for dual subtitle display.
  .
