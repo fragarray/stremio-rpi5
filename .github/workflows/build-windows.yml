@@ -14,12 +14,19 @@ jobs:
     permissions:
       contents: write
 
+    env:
+      GH_TOKEN: ${{ github.token }}
+      QTDIR: C:\Qt\5.15.2\msvc2019
+      OPENSSL_ROOT_DIR: C:\OpenSSL-Win32
+
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          fetch-depth: 0   # full history needed to find latest tag
+        shell: bash
+        run: |
+          git clone --recurse-submodules \
+            "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" \
+            .
+          git fetch --tags
 
       - name: Initialize submodules (fallback)
         shell: bash
@@ -35,15 +42,17 @@ jobs:
             git clone https://github.com/Ivshti/libmpv deps/libmpv
           fi
 
-      - name: Install Qt 5.15.2 (MSVC 2019 x86 + WebEngine)
-        uses: jurplel/install-qt-action@v4
-        with:
-          version: '5.15.2'
-          host: 'windows'
-          target: 'desktop'
-          arch: 'win32_msvc2019'
-          modules: 'qtwebengine'
-          cache: true
+      - name: Install Qt 5.15.2 (MSVC 2019 x86 + WebEngine) via aqtinstall
+        shell: pwsh
+        run: |
+          pip install aqtinstall --quiet
+          aqt install-qt windows desktop 5.15.2 win32_msvc2019 `
+            --modules qtwebengine `
+            --outputdir C:\Qt
+          if (-not (Test-Path "C:\Qt\5.15.2\msvc2019\bin\qmake.exe")) {
+            throw "Qt installation failed: qmake.exe not found"
+          }
+          Write-Host "Qt 5.15.2 ready at C:\Qt\5.15.2\msvc2019"
 
       - name: Install OpenSSL Win32
         shell: pwsh
@@ -93,13 +102,8 @@ jobs:
 
       - name: Build Stremio (MSVC 2019 x86)
         shell: cmd
-        env:
-          OPENSSL_ROOT_DIR: C:\OpenSSL-Win32
         run: |
-          set QTDIR=%Qt5_DIR%
-          set OPENSSL_ROOT_DIR=C:\OpenSSL-Win32
-          :: Add Windows SDK x86 tools (rc.exe, mt.exe) to PATH
-          set PATH=C:\Program Files (x86)\Windows Kits\10\bin\10.0.18362.0\x86\;%Qt5_DIR%\bin;%PATH%
+          set PATH=C:\Program Files (x86)\Windows Kits\10\bin\10.0.18362.0\x86\;C:\Qt\5.15.2\msvc2019\bin;%PATH%
           call "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvars32.bat"
           if errorlevel 1 exit /b 1
 
@@ -108,7 +112,7 @@ jobs:
           pushd release
           cmake -G "NMake Makefiles" ^
             -DCMAKE_BUILD_TYPE=Release ^
-            -DCMAKE_PREFIX_PATH="%Qt5_DIR%" ^
+            -DCMAKE_PREFIX_PATH="C:\Qt\5.15.2\msvc2019" ^
             -DOPENSSL_ROOT_DIR="C:\OpenSSL-Win32" ^
             -DQT_DEFAULT_MAJOR_VERSION=5 ^
             ..
@@ -131,40 +135,24 @@ jobs:
           if exist dist-win rmdir /s /q dist-win
           mkdir dist-win
 
-          :: Stremio shell binary
           copy release\stremio.exe dist-win\
-
-          :: MPV and FFmpeg DLLs from windows/ folder
           copy windows\*.dll dist-win\
           copy windows\*.exe dist-win\
-
-          :: DS (DirectShow) components
           copy windows\DS\DS.exe dist-win\
-          copy windows\DS\Microsoft.Search.Interop.dll dist-win\ 2>nul || true
-
-          :: OpenSSL DLLs
-          copy "C:\OpenSSL-Win32\*.dll" dist-win\ 2>nul || true
+          copy windows\DS\Microsoft.Search.Interop.dll dist-win\ 2>nul
           if exist "C:\OpenSSL-Win32\bin\*.dll" copy "C:\OpenSSL-Win32\bin\*.dll" dist-win\
-
-          :: Node.js runtime (stremio-runtime.exe)
           call windows\generate_stremio-runtime.cmd dist-win
-
-          :: server.js
           copy server.js dist-win\
 
-          :: Qt DLLs + QML plugins
+          set PATH=C:\Qt\5.15.2\msvc2019\bin;%PATH%
           windeployqt --release --no-compiler-runtime --qmldir=. dist-win\stremio.exe
 
-          :: DualSubtitles addon
           mkdir dist-win\DualSubtitles
           xcopy /s /e /i /y "DualSubtitles AddOn\index.js" dist-win\DualSubtitles\
           xcopy /s /e /i /y "DualSubtitles AddOn\package.json" dist-win\DualSubtitles\
           xcopy /s /e /i /y "DualSubtitles AddOn\src" dist-win\DualSubtitles\src\
-          xcopy /s /e /i /y "DualSubtitles AddOn\node_modules" dist-win\DualSubtitles\node_modules\
-
-          :: Launcher script (starts addon + stremio)
+          if exist "DualSubtitles AddOn\node_modules" xcopy /s /e /i /y "DualSubtitles AddOn\node_modules" dist-win\DualSubtitles\node_modules\
           copy windows\stremio-launch.bat dist-win\
-
           echo dist-win assembled
 
       - name: Build NSIS Installer
@@ -194,52 +182,40 @@ jobs:
           git tag "${{ steps.version.outputs.tag }}"
           git push origin "${{ steps.version.outputs.tag }}"
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: stremio-${{ steps.version.outputs.version }}-windows
-          path: |
-            *.zip
-            *.exe
-          retention-days: 90
-
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          name: Stremio v${{ steps.version.outputs.version }} for Windows
-          body: |
-            ## Stremio v${{ steps.version.outputs.version }} — Windows (x86, runs on all Windows 10/11 AMD64)
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="${{ steps.version.outputs.tag }}"
+          cat > release-notes.md << 'EOF'
+          ## Stremio vVERSION_PLACEHOLDER — Windows (x86)
 
-            ### Installation
-            Download the installer `.exe` or the portable `.zip`.
+          ### Installation
+          **Installer:** run `Stremio VERSION_PLACEHOLDER.exe`
+          **Portable:** extract `Stremio_VERSION_PLACEHOLDER_windows.zip` and run `stremio.exe`
+          Use `stremio-launch.bat` to also start the DualSubtitles addon automatically.
 
-            **Installer:**
-            ```
-            Stremio ${{ steps.version.outputs.version }}.exe
-            ```
+          ### What's included
+          - Stremio shell (Qt5/WebEngine UI) compiled with MSVC 2019
+          - Node.js streaming server (server.js)
+          - DualSubtitles addon (dual subtitle support with independent styling)
+          - MPV player with hardware decoding support
 
-            **Portable (no install required):**
-            Extract `Stremio_${{ steps.version.outputs.version }}_windows.zip` and run `stremio.exe`
-            Or use `stremio-launch.bat` to also start the DualSubtitles addon automatically.
+          ### DualSubtitles Addon
+          1. Open Stremio -> Settings -> Addons
+          2. Install via URL: `http://127.0.0.1:7000/manifest.json`
+          3. The addon starts automatically when using `stremio-launch.bat`
 
-            ### What's included
-            - Stremio shell (Qt5/WebEngine UI) compiled with MSVC 2019
-            - Node.js streaming server (server.js)
-            - DualSubtitles addon (dual subtitle support with independent styling)
-            - Launcher script with automatic addon management
-            - MPV player with hardware decoding support
-
-            ### DualSubtitles Addon
-            1. Open Stremio → go to Settings → Addons
-            2. Install via URL: `http://127.0.0.1:7000/manifest.json`
-            3. The addon starts automatically when you use `stremio-launch.bat`
-
-            ### Requirements
-            - Windows 10 or Windows 11 (64-bit)
-            - Node.js (for the DualSubtitles addon standalone mode)
-          files: |
-            *.zip
-            *.exe
-          draft: false
-          prerelease: false
+          ### Requirements
+          - Windows 10 or Windows 11 (64-bit)
+          EOF
+          sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" release-notes.md
+          gh release create "${TAG}" \
+            --title "Stremio v${VERSION} for Windows" \
+            --notes-file release-notes.md \
+            Stremio_${VERSION}_windows.zip \
+            "Stremio ${VERSION}.exe" 2>/dev/null || \
+          gh release create "${TAG}" \
+            --title "Stremio v${VERSION} for Windows" \
+            --notes-file release-notes.md \
+            Stremio_${VERSION}_windows.zip
