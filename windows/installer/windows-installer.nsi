@@ -122,7 +122,8 @@ XPStyle off
 ; Progress bar - part 2
 !define MUI_PAGE_CUSTOMFUNCTION_SHOW InstShow
 
-!uninstfinalize 'signtool sign /fd SHA256 /t http://timestamp.digicert.com /n "Smart Code OOD" "%1"' = 0
+; signtool disabled in CI (no code-signing certificate available)
+;!uninstfinalize 'signtool sign /fd SHA256 /t http://timestamp.digicert.com /n "Smart Code OOD" "%1"' = 0
 
 ; ------------------- ;
 ;    Localization     ;

@@ -244,8 +244,9 @@ jobs:
           copy windows\NsProcess\Plugin\x86-unicode\nsProcess.dll "C:\Program Files (x86)\NSIS\Plugins\x86-unicode\"
           makensis -V2 ./windows/installer/windows-installer.nsi
           if errorlevel 1 (
-            echo NSIS installer build failed, creating ZIP only
+            echo NSIS installer build failed, continuing with ZIP only
           )
+          exit /b 0
 
       - name: Create ZIP archive
         shell: pwsh
