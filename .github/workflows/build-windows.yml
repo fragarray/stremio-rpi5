@@ -35,14 +35,56 @@ jobs:
             rm -rf deps/singleapplication
             git clone https://github.com/itay-grudev/SingleApplication deps/singleapplication
           fi
-          # Check for all required libmpv headers (not just client.h)
-          if [ ! -f deps/libmpv/include/mpv/client.h ] || [ ! -f deps/libmpv/include/mpv/render_gl.h ]; then
-            echo "libmpv headers incomplete (missing render_gl.h or client.h), re-cloning..."
-            rm -rf deps/libmpv
-            git clone https://github.com/Ivshti/libmpv deps/libmpv
-          fi
-          echo "libmpv headers:"
-          ls deps/libmpv/include/mpv/
+          # deps/libmpv is populated by the 'Setup libmpv' step below (not a submodule)
+
+      - name: Setup libmpv for Windows x86 (headers + DLL + MSVC .lib)
+        shell: pwsh
+        run: |
+          # Ivshti/libmpv is 9 years old and missing render API headers.
+          # Download the latest mpv-dev-i686 from shinchiro/mpv-winbuild-cmake
+          # (the standard source for mpv Windows builds, LGPL licensed).
+          $release = Invoke-RestMethod "https://api.github.com/repos/shinchiro/mpv-winbuild-cmake/releases/latest"
+
+          $devAsset = $release.assets |
+            Where-Object { $_.name -match '^mpv-dev-i686-' } |
+            Select-Object -First 1
+          if (-not $devAsset) { throw "mpv-dev-i686 asset not found in latest release" }
+
+          $runtimeAsset = $release.assets |
+            Where-Object { $_.name -match '^mpv-i686-\d' -and $_.name -notmatch 'dev' } |
+            Select-Object -First 1
+          if (-not $runtimeAsset) { throw "mpv-i686 runtime asset not found" }
+
+          Write-Host "Downloading dev pkg: $($devAsset.name)"
+          Invoke-WebRequest $devAsset.browser_download_url -OutFile mpv-dev-i686.7z
+          Write-Host "Downloading runtime pkg: $($runtimeAsset.name)"
+          Invoke-WebRequest $runtimeAsset.browser_download_url -OutFile mpv-i686.7z
+
+          $sz = "C:\Program Files\7-Zip\7z.exe"
+          & $sz x mpv-dev-i686.7z -y -o"mpv-dev-pkg"  | Select-String 'Error|error' | Write-Host
+          & $sz x mpv-i686.7z     -y -o"mpv-runtime-pkg" | Select-String 'Error|error' | Write-Host
+
+          # Copy headers (they are in include/mpv/ inside the archive)
+          New-Item -ItemType Directory -Force "deps\libmpv\include\mpv" | Out-Null
+          $hFile = Get-ChildItem "mpv-dev-pkg" -Filter "client.h" -Recurse | Select-Object -First 1
+          if (-not $hFile) { throw "client.h not found in dev package" }
+          Copy-Item "$($hFile.DirectoryName)\*.h" "deps\libmpv\include\mpv\" -Force
+          Write-Host "mpv headers:"; Get-ChildItem "deps\libmpv\include\mpv" | Select-Object -ExpandProperty Name
+
+          # Copy .def file (used to generate MSVC mpv.lib inside the build step)
+          New-Item -ItemType Directory -Force "deps\libmpv\win32" | Out-Null
+          $defFile = Get-ChildItem "mpv-dev-pkg" -Filter "mpv.def" -Recurse | Select-Object -First 1
+          if (-not $defFile) { throw "mpv.def not found in dev package" }
+          Copy-Item $defFile.FullName "deps\libmpv\win32\mpv.def" -Force
+          Write-Host "mpv.def copied from $($defFile.FullName)"
+
+          # Copy mpv DLL to windows/ so it gets bundled into dist-win
+          $dll = Get-ChildItem "mpv-runtime-pkg" -Filter "*.dll" -Recurse |
+            Where-Object { $_.Name -match '^mpv' -or $_.Name -match '^libmpv' } |
+            Select-Object -First 1
+          if (-not $dll) { throw "mpv DLL not found in runtime package" }
+          Copy-Item $dll.FullName "windows\$($dll.Name)" -Force
+          Write-Host "mpv DLL: windows\$($dll.Name)"
 
       - name: Install Qt 5.15.2 (MSVC 2019 x86 + WebEngine) via aqtinstall
         shell: pwsh
@@ -119,6 +161,11 @@ jobs:
           set PATH=C:\Program Files (x86)\Windows Kits\10\bin\10.0.19041.0\x86\;C:\Qt\5.15.2\msvc2019\bin;%PATH%
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars32.bat"
           if errorlevel 1 exit /b 1
+
+          :: Generate MSVC import library from mpv.def (contains render API exports)
+          lib /def:deps\libmpv\win32\mpv.def /machine:x86 /out:deps\libmpv\win32\mpv.lib /nologo
+          if errorlevel 1 exit /b 1
+          echo mpv.lib generated from mpv.def
 
           if exist release rmdir /s /q release
           mkdir release
