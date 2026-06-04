@@ -50,33 +50,29 @@ jobs:
             Select-Object -First 1
           if (-not $devAsset) { throw "mpv-dev-i686 asset not found in latest release" }
 
-          $runtimeAsset = $release.assets |
-            Where-Object { $_.name -match '^mpv-i686-\d' -and $_.name -notmatch 'dev' } |
-            Select-Object -First 1
-          if (-not $runtimeAsset) { throw "mpv-i686 runtime asset not found" }
-
           Write-Host "Downloading dev pkg: $($devAsset.name)"
           Invoke-WebRequest $devAsset.browser_download_url -OutFile mpv-dev-i686.7z
-          Write-Host "Downloading runtime pkg: $($runtimeAsset.name)"
-          Invoke-WebRequest $runtimeAsset.browser_download_url -OutFile mpv-i686.7z
 
           $sz = "C:\Program Files\7-Zip\7z.exe"
-          & $sz x mpv-dev-i686.7z -y -o"mpv-dev-pkg"  | Select-String 'Error|error' | Write-Host
-          & $sz x mpv-i686.7z     -y -o"mpv-runtime-pkg" | Select-String 'Error|error' | Write-Host
+          & $sz x mpv-dev-i686.7z -y -o"mpv-dev-pkg" | Out-Null
 
-          # Copy headers (they are in include/mpv/ inside the archive)
+          # Copy headers
           New-Item -ItemType Directory -Force "deps\libmpv\include\mpv" | Out-Null
           $hFile = Get-ChildItem "mpv-dev-pkg" -Filter "client.h" -Recurse | Select-Object -First 1
           if (-not $hFile) { throw "client.h not found in dev package" }
           Copy-Item "$($hFile.DirectoryName)\*.h" "deps\libmpv\include\mpv\" -Force
           Write-Host "mpv headers:"; Get-ChildItem "deps\libmpv\include\mpv" | Select-Object -ExpandProperty Name
 
-          # Copy mpv DLL to both deps/libmpv/win32/ (for .lib generation) and windows/
+          # The dev package also contains libmpv-2.dll (and libmpv.dll.a for MinGW)
           New-Item -ItemType Directory -Force "deps\libmpv\win32" | Out-Null
-          $dll = Get-ChildItem "mpv-runtime-pkg" -Filter "*.dll" -Recurse |
-            Where-Object { $_.Name -match '^mpv' -or $_.Name -match '^libmpv' } |
+          $dll = Get-ChildItem "mpv-dev-pkg" -Filter "*.dll" -Recurse |
+            Where-Object { $_.Name -match '^libmpv' -or $_.Name -match '^mpv' } |
             Select-Object -First 1
-          if (-not $dll) { throw "mpv DLL not found in runtime package" }
+          if (-not $dll) {
+            Write-Host "DLL not found in dev pkg. Contents:"
+            Get-ChildItem "mpv-dev-pkg" -Recurse | Select-Object -ExpandProperty FullName
+            throw "mpv DLL not found in dev package"
+          }
           Copy-Item $dll.FullName "deps\libmpv\win32\$($dll.Name)" -Force
           Copy-Item $dll.FullName "windows\$($dll.Name)" -Force
           Write-Host "mpv DLL: $($dll.Name)"
