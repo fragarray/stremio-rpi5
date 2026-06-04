@@ -78,13 +78,44 @@ jobs:
           Copy-Item $defFile.FullName "deps\libmpv\win32\mpv.def" -Force
           Write-Host "mpv.def copied from $($defFile.FullName)"
 
-          # Copy mpv DLL to windows/ so it gets bundled into dist-win
+          # Copy mpv DLL to both deps/libmpv/win32/ (for .lib generation) and windows/
+          New-Item -ItemType Directory -Force "deps\libmpv\win32" | Out-Null
           $dll = Get-ChildItem "mpv-runtime-pkg" -Filter "*.dll" -Recurse |
             Where-Object { $_.Name -match '^mpv' -or $_.Name -match '^libmpv' } |
             Select-Object -First 1
           if (-not $dll) { throw "mpv DLL not found in runtime package" }
+          Copy-Item $dll.FullName "deps\libmpv\win32\$($dll.Name)" -Force
           Copy-Item $dll.FullName "windows\$($dll.Name)" -Force
-          Write-Host "mpv DLL: windows\$($dll.Name)"
+          Write-Host "mpv DLL: $($dll.Name)"
+          echo "MPV_DLL_NAME=$($dll.Name)" >> $env:GITHUB_ENV
+
+      - name: Generate mpv.lib (MSVC x86 import library from DLL exports)
+        shell: pwsh
+        run: |
+          # mpv-dev-i686 has no .def file; generate one from the DLL exports using dumpbin
+          $msvcBase = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC"
+          $msvcVer  = (Get-ChildItem $msvcBase | Sort-Object Name -Descending | Select-Object -First 1).Name
+          $dumpbin  = "$msvcBase\$msvcVer\bin\Hostx86\x86\dumpbin.exe"
+          $libExe   = "$msvcBase\$msvcVer\bin\Hostx86\x86\lib.exe"
+
+          $dllPath = "deps\libmpv\win32\$env:MPV_DLL_NAME"
+          Write-Host "Extracting exports from: $dllPath"
+
+          $dumpOut = & $dumpbin /exports $dllPath 2>&1
+          $defLines = @("EXPORTS")
+          foreach ($line in $dumpOut) {
+            # dumpbin export line format:  "    N  hint   RVA   name"
+            if ($line -match '^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\w+)\s*$') {
+              $defLines += "  $($Matches[1])"
+            }
+          }
+          if ($defLines.Count -lt 2) { throw "No exports parsed from $dllPath" }
+          $defLines | Set-Content "deps\libmpv\win32\mpv.def" -Encoding ASCII
+          Write-Host "mpv.def: $($defLines.Count - 1) exports"
+
+          & $libExe /def:"deps\libmpv\win32\mpv.def" /machine:x86 /out:"deps\libmpv\win32\mpv.lib" /nologo
+          if ($LASTEXITCODE -ne 0) { throw "lib.exe failed with exit code $LASTEXITCODE" }
+          Write-Host "mpv.lib generated at deps\libmpv\win32\mpv.lib"
 
       - name: Install Qt 5.15.2 (MSVC 2019 x86 + WebEngine) via aqtinstall
         shell: pwsh
@@ -161,11 +192,6 @@ jobs:
           set PATH=C:\Program Files (x86)\Windows Kits\10\bin\10.0.19041.0\x86\;C:\Qt\5.15.2\msvc2019\bin;%PATH%
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars32.bat"
           if errorlevel 1 exit /b 1
-
-          :: Generate MSVC import library from mpv.def (contains render API exports)
-          lib /def:deps\libmpv\win32\mpv.def /machine:x86 /out:deps\libmpv\win32\mpv.lib /nologo
-          if errorlevel 1 exit /b 1
-          echo mpv.lib generated from mpv.def
 
           if exist release rmdir /s /q release
           mkdir release
