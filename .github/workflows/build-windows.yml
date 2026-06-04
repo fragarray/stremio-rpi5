@@ -9,7 +9,7 @@ on:
 
 jobs:
   build-windows:
-    runs-on: windows-2019
+    runs-on: windows-2022
     timeout-minutes: 90
     permissions:
       contents: write
@@ -17,7 +17,6 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       QTDIR: C:\Qt\5.15.2\msvc2019
-      OPENSSL_ROOT_DIR: C:\OpenSSL-Win32
 
     steps:
       - name: Checkout
@@ -54,26 +53,19 @@ jobs:
           }
           Write-Host "Qt 5.15.2 ready at C:\Qt\5.15.2\msvc2019"
 
-      - name: Install OpenSSL Win32
+      - name: Locate pre-installed OpenSSL
         shell: pwsh
         run: |
-          $hashesUrl = 'https://raw.githubusercontent.com/slproweb/opensslhashes/master/win32_openssl_hashes.json'
-          $files = (Invoke-RestMethod $hashesUrl).files
-          # Prefer 3.x, fall back to 1.1.1
-          $file = $files.psobject.properties.name |
-            Where-Object { $_ -match '^Win32OpenSSL-3_' -and $_.EndsWith('.exe') } |
-            Select-Object -First 1
-          if (-not $file) {
-            $file = $files.psobject.properties.name |
-              Where-Object { $_ -match '^Win32OpenSSL-1_1_1' -and $_.EndsWith('.exe') } |
-              Select-Object -First 1
-          }
-          if (-not $file) { throw "No suitable OpenSSL installer found" }
-          Write-Host "Downloading $file from $($files.$file.url)"
-          Invoke-WebRequest $files.$file.url -OutFile openssl_installer.exe
-          Start-Process ./openssl_installer.exe -ArgumentList '/silent /verysilent /sp- /suppressmsgboxes /dir=C:\OpenSSL-Win32' -Wait
-          Remove-Item openssl_installer.exe
-          Write-Host "OpenSSL installed to C:\OpenSSL-Win32"
+          # windows-2022 runner has OpenSSL pre-installed; detect its path
+          $candidates = @(
+            "C:\Program Files\OpenSSL",
+            "C:\Program Files\OpenSSL-Win64",
+            "C:\OpenSSL-Win64"
+          )
+          $found = $candidates | Where-Object { Test-Path "$_\include\openssl\ssl.h" } | Select-Object -First 1
+          if (-not $found) { throw "OpenSSL not found on runner" }
+          echo "OPENSSL_ROOT_DIR=$found" >> $env:GITHUB_ENV
+          Write-Host "Using OpenSSL at: $found"
 
       - name: Install addon dependencies
         run: cd "DualSubtitles AddOn" && npm install --production
@@ -100,11 +92,12 @@ jobs:
           echo "tag=v${VERSION}-windows" >> "$GITHUB_OUTPUT"
           echo "Next Windows release: v${VERSION}-windows"
 
-      - name: Build Stremio (MSVC 2019 x86)
+      - name: Build Stremio (MSVC 2022 x86)
         shell: cmd
         run: |
-          set PATH=C:\Program Files (x86)\Windows Kits\10\bin\10.0.18362.0\x86\;C:\Qt\5.15.2\msvc2019\bin;%PATH%
-          call "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvars32.bat"
+          :: windows-2022 runner: VS 2022 Enterprise, Windows SDK 10.0.19041.0
+          set PATH=C:\Program Files (x86)\Windows Kits\10\bin\10.0.19041.0\x86\;C:\Qt\5.15.2\msvc2019\bin;%PATH%
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars32.bat"
           if errorlevel 1 exit /b 1
 
           if exist release rmdir /s /q release
@@ -113,7 +106,7 @@ jobs:
           cmake -G "NMake Makefiles" ^
             -DCMAKE_BUILD_TYPE=Release ^
             -DCMAKE_PREFIX_PATH="C:\Qt\5.15.2\msvc2019" ^
-            -DOPENSSL_ROOT_DIR="C:\OpenSSL-Win32" ^
+            -DOPENSSL_ROOT_DIR="%OPENSSL_ROOT_DIR%" ^
             -DQT_DEFAULT_MAJOR_VERSION=5 ^
             ..
           if errorlevel 1 exit /b 1
@@ -141,6 +134,7 @@ jobs:
           copy windows\DS\DS.exe dist-win\
           copy windows\DS\Microsoft.Search.Interop.dll dist-win\ 2>nul
           if exist "C:\OpenSSL-Win32\bin\*.dll" copy "C:\OpenSSL-Win32\bin\*.dll" dist-win\
+          if exist "%OPENSSL_ROOT_DIR%\bin\*.dll" copy "%OPENSSL_ROOT_DIR%\bin\*.dll" dist-win\
           call windows\generate_stremio-runtime.cmd dist-win
           copy server.js dist-win\
 
@@ -158,8 +152,8 @@ jobs:
       - name: Build NSIS Installer
         shell: cmd
         run: |
+          :: NSIS 3.10 is pre-installed on windows-2022 runner
           set package_version=${{ steps.version.outputs.version }}
-          :: Install NsProcess NSIS plugin
           copy windows\NsProcess\Include\nsProcess.nsh "C:\Program Files (x86)\NSIS\Include\"
           copy windows\NsProcess\Plugin\x86-ansi\nsProcess.dll "C:\Program Files (x86)\NSIS\Plugins\x86-ansi\"
           copy windows\NsProcess\Plugin\x86-unicode\nsProcess.dll "C:\Program Files (x86)\NSIS\Plugins\x86-unicode\"
