@@ -35,11 +35,14 @@ jobs:
             rm -rf deps/singleapplication
             git clone https://github.com/itay-grudev/SingleApplication deps/singleapplication
           fi
-          if [ ! -f deps/libmpv/include/mpv/client.h ]; then
-            echo "libmpv headers missing, cloning manually..."
+          # Check for all required libmpv headers (not just client.h)
+          if [ ! -f deps/libmpv/include/mpv/client.h ] || [ ! -f deps/libmpv/include/mpv/render_gl.h ]; then
+            echo "libmpv headers incomplete (missing render_gl.h or client.h), re-cloning..."
             rm -rf deps/libmpv
             git clone https://github.com/Ivshti/libmpv deps/libmpv
           fi
+          echo "libmpv headers:"
+          ls deps/libmpv/include/mpv/
 
       - name: Install Qt 5.15.2 (MSVC 2019 x86 + WebEngine) via aqtinstall
         shell: pwsh
