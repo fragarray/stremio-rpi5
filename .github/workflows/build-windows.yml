@@ -61,6 +61,9 @@ jobs:
           $hFile = Get-ChildItem "mpv-dev-pkg" -Filter "client.h" -Recurse | Select-Object -First 1
           if (-not $hFile) { throw "client.h not found in dev package" }
           Copy-Item "$($hFile.DirectoryName)\*.h" "deps\libmpv\include\mpv\" -Force
+          # qthelper.hpp is Qt-specific and not in shinchiro packages; fetch from Ivshti/libmpv
+          Invoke-WebRequest "https://raw.githubusercontent.com/Ivshti/libmpv/master/include/mpv/qthelper.hpp" `
+            -OutFile "deps\libmpv\include\mpv\qthelper.hpp"
           Write-Host "mpv headers:"; Get-ChildItem "deps\libmpv\include\mpv" | Select-Object -ExpandProperty Name
 
           # The dev package also contains libmpv-2.dll (and libmpv.dll.a for MinGW)
