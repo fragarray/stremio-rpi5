@@ -71,13 +71,6 @@ jobs:
           Copy-Item "$($hFile.DirectoryName)\*.h" "deps\libmpv\include\mpv\" -Force
           Write-Host "mpv headers:"; Get-ChildItem "deps\libmpv\include\mpv" | Select-Object -ExpandProperty Name
 
-          # Copy .def file (used to generate MSVC mpv.lib inside the build step)
-          New-Item -ItemType Directory -Force "deps\libmpv\win32" | Out-Null
-          $defFile = Get-ChildItem "mpv-dev-pkg" -Filter "mpv.def" -Recurse | Select-Object -First 1
-          if (-not $defFile) { throw "mpv.def not found in dev package" }
-          Copy-Item $defFile.FullName "deps\libmpv\win32\mpv.def" -Force
-          Write-Host "mpv.def copied from $($defFile.FullName)"
-
           # Copy mpv DLL to both deps/libmpv/win32/ (for .lib generation) and windows/
           New-Item -ItemType Directory -Force "deps\libmpv\win32" | Out-Null
           $dll = Get-ChildItem "mpv-runtime-pkg" -Filter "*.dll" -Recurse |
