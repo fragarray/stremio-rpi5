@@ -60,7 +60,11 @@ add_subdirectory(deps/singleapplication)
 
 set(CMAKE_BUILD_RPATH_USE_ORIGIN TRUE)
 
-find_package(Qt${QT_DEFAULT_MAJOR_VERSION} COMPONENTS Widgets Network Qml Quick WebEngine WebChannel DBus OpenGL REQUIRED)
+if(WIN32)
+  find_package(Qt${QT_DEFAULT_MAJOR_VERSION} COMPONENTS Widgets Network Qml Quick WebEngine WebChannel OpenGL REQUIRED)
+else()
+  find_package(Qt${QT_DEFAULT_MAJOR_VERSION} COMPONENTS Widgets Network Qml Quick WebEngine WebChannel DBus OpenGL REQUIRED)
+endif()
 find_package(OpenSSL REQUIRED)
 find_package(MPV REQUIRED)
 
@@ -130,12 +134,14 @@ target_link_libraries(${PROJECT_NAME} LINK_PUBLIC
   Qt5::Widgets
   Qt5::WebEngine
   Qt5::WebChannel
-  Qt5::DBus
   Qt5::OpenGL
   SingleApplication::SingleApplication
   OpenSSL::Crypto
   ${MPV_LIBRARY}
 )
+if(NOT WIN32)
+  target_link_libraries(${PROJECT_NAME} LINK_PUBLIC Qt5::DBus)
+endif()
 
 if(UNIX AND NOT APPLE)
   install(TARGETS ${PROJECT_NAME} RUNTIME DESTINATION opt/stremio)

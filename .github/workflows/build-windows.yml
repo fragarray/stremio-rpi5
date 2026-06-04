@@ -1,0 +1,245 @@
+name: Build & Release Windows x86
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  build-windows:
+    runs-on: windows-2019
+    timeout-minutes: 90
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0   # full history needed to find latest tag
+
+      - name: Initialize submodules (fallback)
+        shell: bash
+        run: |
+          if [ ! -f deps/singleapplication/CMakeLists.txt ]; then
+            echo "SingleApplication submodule missing, cloning manually..."
+            rm -rf deps/singleapplication
+            git clone https://github.com/itay-grudev/SingleApplication deps/singleapplication
+          fi
+          if [ ! -f deps/libmpv/include/mpv/client.h ]; then
+            echo "libmpv headers missing, cloning manually..."
+            rm -rf deps/libmpv
+            git clone https://github.com/Ivshti/libmpv deps/libmpv
+          fi
+
+      - name: Install Qt 5.15.2 (MSVC 2019 x86 + WebEngine)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '5.15.2'
+          host: 'windows'
+          target: 'desktop'
+          arch: 'win32_msvc2019'
+          modules: 'qtwebengine'
+          cache: true
+
+      - name: Install OpenSSL Win32
+        shell: pwsh
+        run: |
+          $hashesUrl = 'https://raw.githubusercontent.com/slproweb/opensslhashes/master/win32_openssl_hashes.json'
+          $files = (Invoke-RestMethod $hashesUrl).files
+          # Prefer 3.x, fall back to 1.1.1
+          $file = $files.psobject.properties.name |
+            Where-Object { $_ -match '^Win32OpenSSL-3_' -and $_.EndsWith('.exe') } |
+            Select-Object -First 1
+          if (-not $file) {
+            $file = $files.psobject.properties.name |
+              Where-Object { $_ -match '^Win32OpenSSL-1_1_1' -and $_.EndsWith('.exe') } |
+              Select-Object -First 1
+          }
+          if (-not $file) { throw "No suitable OpenSSL installer found" }
+          Write-Host "Downloading $file from $($files.$file.url)"
+          Invoke-WebRequest $files.$file.url -OutFile openssl_installer.exe
+          Start-Process ./openssl_installer.exe -ArgumentList '/silent /verysilent /sp- /suppressmsgboxes /dir=C:\OpenSSL-Win32' -Wait
+          Remove-Item openssl_installer.exe
+          Write-Host "OpenSSL installed to C:\OpenSSL-Win32"
+
+      - name: Install addon dependencies
+        run: cd "DualSubtitles AddOn" && npm install --production
+        shell: cmd
+
+      - name: Compute next version
+        id: version
+        shell: bash
+        run: |
+          BASE=$(sed -E '/^project\(/!d;s/^.*VERSION "([^"]+)".*$/\1/g' CMakeLists.txt)
+          MAJOR=$(echo "$BASE" | cut -d. -f1)
+          MINOR=$(echo "$BASE" | cut -d. -f2)
+
+          LATEST_TAG=$(git tag -l "v${MAJOR}.${MINOR}.*-windows" --sort=-v:refname | head -n1)
+          if [ -n "$LATEST_TAG" ]; then
+            LAST_PATCH=$(echo "$LATEST_TAG" | sed "s/v${MAJOR}\.${MINOR}\.\([0-9]*\).*/\1/")
+            NEXT_PATCH=$((LAST_PATCH + 1))
+          else
+            NEXT_PATCH=$(echo "$BASE" | cut -d. -f3)
+          fi
+
+          VERSION="${MAJOR}.${MINOR}.${NEXT_PATCH}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}-windows" >> "$GITHUB_OUTPUT"
+          echo "Next Windows release: v${VERSION}-windows"
+
+      - name: Build Stremio (MSVC 2019 x86)
+        shell: cmd
+        env:
+          OPENSSL_ROOT_DIR: C:\OpenSSL-Win32
+        run: |
+          set QTDIR=%Qt5_DIR%
+          set OPENSSL_ROOT_DIR=C:\OpenSSL-Win32
+          :: Add Windows SDK x86 tools (rc.exe, mt.exe) to PATH
+          set PATH=C:\Program Files (x86)\Windows Kits\10\bin\10.0.18362.0\x86\;%Qt5_DIR%\bin;%PATH%
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvars32.bat"
+          if errorlevel 1 exit /b 1
+
+          if exist release rmdir /s /q release
+          mkdir release
+          pushd release
+          cmake -G "NMake Makefiles" ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DCMAKE_PREFIX_PATH="%Qt5_DIR%" ^
+            -DOPENSSL_ROOT_DIR="C:\OpenSSL-Win32" ^
+            -DQT_DEFAULT_MAJOR_VERSION=5 ^
+            ..
+          if errorlevel 1 exit /b 1
+          cmake --build .
+          if errorlevel 1 exit /b 1
+          popd
+          echo Build OK
+
+      - name: Download server.js
+        shell: pwsh
+        run: |
+          $url = (Get-Content server-url.txt).Trim()
+          Write-Host "Downloading server.js from $url"
+          Invoke-WebRequest $url -OutFile server.js
+
+      - name: Assemble dist-win
+        shell: cmd
+        run: |
+          if exist dist-win rmdir /s /q dist-win
+          mkdir dist-win
+
+          :: Stremio shell binary
+          copy release\stremio.exe dist-win\
+
+          :: MPV and FFmpeg DLLs from windows/ folder
+          copy windows\*.dll dist-win\
+          copy windows\*.exe dist-win\
+
+          :: DS (DirectShow) components
+          copy windows\DS\DS.exe dist-win\
+          copy windows\DS\Microsoft.Search.Interop.dll dist-win\ 2>nul || true
+
+          :: OpenSSL DLLs
+          copy "C:\OpenSSL-Win32\*.dll" dist-win\ 2>nul || true
+          if exist "C:\OpenSSL-Win32\bin\*.dll" copy "C:\OpenSSL-Win32\bin\*.dll" dist-win\
+
+          :: Node.js runtime (stremio-runtime.exe)
+          call windows\generate_stremio-runtime.cmd dist-win
+
+          :: server.js
+          copy server.js dist-win\
+
+          :: Qt DLLs + QML plugins
+          windeployqt --release --no-compiler-runtime --qmldir=. dist-win\stremio.exe
+
+          :: DualSubtitles addon
+          mkdir dist-win\DualSubtitles
+          xcopy /s /e /i /y "DualSubtitles AddOn\index.js" dist-win\DualSubtitles\
+          xcopy /s /e /i /y "DualSubtitles AddOn\package.json" dist-win\DualSubtitles\
+          xcopy /s /e /i /y "DualSubtitles AddOn\src" dist-win\DualSubtitles\src\
+          xcopy /s /e /i /y "DualSubtitles AddOn\node_modules" dist-win\DualSubtitles\node_modules\
+
+          :: Launcher script (starts addon + stremio)
+          copy windows\stremio-launch.bat dist-win\
+
+          echo dist-win assembled
+
+      - name: Build NSIS Installer
+        shell: cmd
+        run: |
+          set package_version=${{ steps.version.outputs.version }}
+          :: Install NsProcess NSIS plugin
+          copy windows\NsProcess\Include\nsProcess.nsh "C:\Program Files (x86)\NSIS\Include\"
+          copy windows\NsProcess\Plugin\x86-ansi\nsProcess.dll "C:\Program Files (x86)\NSIS\Plugins\x86-ansi\"
+          copy windows\NsProcess\Plugin\x86-unicode\nsProcess.dll "C:\Program Files (x86)\NSIS\Plugins\x86-unicode\"
+          makensis -V2 ./windows/installer/windows-installer.nsi
+          if errorlevel 1 (
+            echo NSIS installer build failed, creating ZIP only
+          )
+
+      - name: Create ZIP archive
+        shell: pwsh
+        run: |
+          Compress-Archive -Path .\dist-win -DestinationPath "Stremio_${{ steps.version.outputs.version }}_windows.zip"
+          Write-Host "Created Stremio_${{ steps.version.outputs.version }}_windows.zip"
+
+      - name: Create tag
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "${{ steps.version.outputs.tag }}"
+          git push origin "${{ steps.version.outputs.tag }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stremio-${{ steps.version.outputs.version }}-windows
+          path: |
+            *.zip
+            *.exe
+          retention-days: 90
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Stremio v${{ steps.version.outputs.version }} for Windows
+          body: |
+            ## Stremio v${{ steps.version.outputs.version }} — Windows (x86, runs on all Windows 10/11 AMD64)
+
+            ### Installation
+            Download the installer `.exe` or the portable `.zip`.
+
+            **Installer:**
+            ```
+            Stremio ${{ steps.version.outputs.version }}.exe
+            ```
+
+            **Portable (no install required):**
+            Extract `Stremio_${{ steps.version.outputs.version }}_windows.zip` and run `stremio.exe`
+            Or use `stremio-launch.bat` to also start the DualSubtitles addon automatically.
+
+            ### What's included
+            - Stremio shell (Qt5/WebEngine UI) compiled with MSVC 2019
+            - Node.js streaming server (server.js)
+            - DualSubtitles addon (dual subtitle support with independent styling)
+            - Launcher script with automatic addon management
+            - MPV player with hardware decoding support
+
+            ### DualSubtitles Addon
+            1. Open Stremio → go to Settings → Addons
+            2. Install via URL: `http://127.0.0.1:7000/manifest.json`
+            3. The addon starts automatically when you use `stremio-launch.bat`
+
+            ### Requirements
+            - Windows 10 or Windows 11 (64-bit)
+            - Node.js (for the DualSubtitles addon standalone mode)
+          files: |
+            *.zip
+            *.exe
+          draft: false
+          prerelease: false
