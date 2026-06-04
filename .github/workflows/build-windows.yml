@@ -209,31 +209,75 @@ jobs:
           Invoke-WebRequest $url -OutFile server.js
 
       - name: Assemble dist-win
-        shell: cmd
+        shell: pwsh
         run: |
-          if exist dist-win rmdir /s /q dist-win
-          mkdir dist-win
+          if (Test-Path dist-win) { Remove-Item -Recurse -Force dist-win }
+          New-Item -ItemType Directory dist-win | Out-Null
 
-          copy release\stremio.exe dist-win\
-          copy windows\*.dll dist-win\
-          copy windows\*.exe dist-win\
-          copy windows\DS\DS.exe dist-win\
-          copy windows\DS\Microsoft.Search.Interop.dll dist-win\ 2>nul
-          if exist "C:\OpenSSL-Win32\bin\*.dll" copy "C:\OpenSSL-Win32\bin\*.dll" dist-win\
-          if exist "%OPENSSL_ROOT_DIR%\bin\*.dll" copy "%OPENSSL_ROOT_DIR%\bin\*.dll" dist-win\
-          call windows\generate_stremio-runtime.cmd dist-win
-          copy server.js dist-win\
+          # Core binaries
+          Copy-Item release\stremio.exe dist-win\
+          Get-ChildItem windows\*.dll -ErrorAction SilentlyContinue | Copy-Item -Destination dist-win\
+          Get-ChildItem windows\*.exe -ErrorAction SilentlyContinue | Copy-Item -Destination dist-win\
+          if (Test-Path "windows\DS\DS.exe") { Copy-Item "windows\DS\DS.exe" dist-win\ }
+          if (Test-Path "windows\DS\Microsoft.Search.Interop.dll") { Copy-Item "windows\DS\Microsoft.Search.Interop.dll" dist-win\ }
 
-          set PATH=C:\Qt\5.15.2\msvc2019\bin;%PATH%
-          windeployqt --release --no-compiler-runtime --qmldir=. dist-win\stremio.exe
+          # OpenSSL DLLs
+          Get-ChildItem "C:\OpenSSL-Win32\bin\*.dll" -ErrorAction SilentlyContinue | Copy-Item -Destination dist-win\
+          if ($env:OPENSSL_ROOT_DIR) {
+            Get-ChildItem "$env:OPENSSL_ROOT_DIR\bin\*.dll" -ErrorAction SilentlyContinue | Copy-Item -Destination dist-win\
+          }
 
-          mkdir dist-win\DualSubtitles
-          xcopy /s /e /i /y "DualSubtitles AddOn\index.js" dist-win\DualSubtitles\
-          xcopy /s /e /i /y "DualSubtitles AddOn\package.json" dist-win\DualSubtitles\
-          xcopy /s /e /i /y "DualSubtitles AddOn\src" dist-win\DualSubtitles\src\
-          if exist "DualSubtitles AddOn\node_modules" xcopy /s /e /i /y "DualSubtitles AddOn\node_modules" dist-win\DualSubtitles\node_modules\
-          copy windows\stremio-launch.bat dist-win\
-          echo dist-win assembled
+          # stremio-runtime.exe: copy node.exe (x86 build uses 32-bit node if available, otherwise 64-bit)
+          # The QML code does: applicationDirPath + "/stremio-runtime.exe"
+          # We need an .exe that can run server.js. Use the system node.exe renamed.
+          $nodePaths = @(
+            "C:\Program Files\nodejs\node.exe",
+            "C:\Program Files (x86)\nodejs\node.exe",
+            (Get-Command node -ErrorAction SilentlyContinue)?.Source
+          ) | Where-Object { $_ -and (Test-Path $_) }
+          $nodeExe = $nodePaths | Select-Object -First 1
+          if (-not $nodeExe) { throw "node.exe not found on runner" }
+          Write-Host "Using node from: $nodeExe"
+
+          # Download rcedit-x86.exe to patch the copy of node.exe
+          Invoke-WebRequest "https://github.com/electron/rcedit/releases/download/v1.1.1/rcedit-x86.exe" `
+            -OutFile rcedit-x86.exe
+          
+          $rtExe = "dist-win\stremio-runtime.exe"
+          Copy-Item $nodeExe $rtExe
+          
+          # Patch icon and version strings
+          $icoPath = (Resolve-Path "images\stremio_gray.ico" -ErrorAction SilentlyContinue)?.Path
+          if ($icoPath) {
+            & .\rcedit-x86.exe $rtExe --set-icon $icoPath `
+              --set-version-string "ProductName" "StremioRuntime" `
+              --set-version-string "FileDescription" "Stremio Server JavaScript Runtime" `
+              --set-version-string "OriginalFilename" "stremio-runtime.exe" `
+              --set-version-string "InternalName" "stremio-runtime"
+          } else {
+            Write-Host "Warning: stremio_gray.ico not found, skipping rcedit patching"
+          }
+          if (-not (Test-Path $rtExe)) { throw "stremio-runtime.exe was not created" }
+          Write-Host "stremio-runtime.exe ready ($('{0:N1}' -f ((Get-Item $rtExe).Length/1MB)) MB)"
+
+          # server.js
+          Copy-Item server.js dist-win\
+
+          # Qt runtime
+          $env:PATH = "C:\Qt\5.15.2\msvc2019\bin;$env:PATH"
+          & windeployqt --release --no-compiler-runtime --qmldir=. dist-win\stremio.exe
+
+          # DualSubtitles addon
+          New-Item -ItemType Directory -Force dist-win\DualSubtitles | Out-Null
+          Copy-Item "DualSubtitles AddOn\index.js"    dist-win\DualSubtitles\ -Force
+          Copy-Item "DualSubtitles AddOn\package.json" dist-win\DualSubtitles\ -Force
+          Copy-Item "DualSubtitles AddOn\src"          dist-win\DualSubtitles\src -Recurse -Force
+          if (Test-Path "DualSubtitles AddOn\node_modules") {
+            Copy-Item "DualSubtitles AddOn\node_modules" dist-win\DualSubtitles\node_modules -Recurse -Force
+          }
+          Copy-Item windows\stremio-launch.bat dist-win\
+          Write-Host "dist-win assembled. Contents:"
+          Get-ChildItem dist-win | Select-Object -ExpandProperty Name
 
       - name: Build NSIS Installer
         shell: cmd
