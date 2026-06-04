@@ -43,7 +43,8 @@ jobs:
           # Ivshti/libmpv is 9 years old and missing render API headers.
           # Download the latest mpv-dev-i686 from shinchiro/mpv-winbuild-cmake
           # (the standard source for mpv Windows builds, LGPL licensed).
-          $release = Invoke-RestMethod "https://api.github.com/repos/shinchiro/mpv-winbuild-cmake/releases/latest"
+          $release = Invoke-RestMethod "https://api.github.com/repos/shinchiro/mpv-winbuild-cmake/releases/latest" `
+            -Headers @{ Authorization = "Bearer $env:GITHUB_TOKEN" }
 
           $devAsset = $release.assets |
             Where-Object { $_.name -match '^mpv-dev-i686-' } |
